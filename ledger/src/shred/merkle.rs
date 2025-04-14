@@ -1114,20 +1114,24 @@ pub(super) fn make_shreds_from_data(
         };
         // Find the Merkle proof_size and data_buffer_size
         // which can embed the remaining data.
-        let (proof_size, data_buffer_size, num_data_shreds) = (1u8..32)
+        let (proof_size, data_buffer_size, num_data_shreds, pad_bytes) = (1u8..32)
             .find_map(|proof_size| {
                 let data_buffer_size = ShredData::capacity(proof_size, chained, resigned).ok()?;
-                let num_data_shreds = data.len().div_ceil(data_buffer_size);
+                let actual_data_len = data.len();
+                let num_data_shreds = actual_data_len.div_ceil(data_buffer_size);
                 let num_data_shreds = num_data_shreds.max(min_num_data_shreds);
+                let pad_bytes = (num_data_shreds * data_buffer_size) - actual_data_len;
                 let erasure_batch_size =
                     shredder::get_erasure_batch_size(num_data_shreds, is_last_in_slot);
                 (proof_size == get_proof_size(erasure_batch_size)).then_some((
                     proof_size,
                     data_buffer_size,
                     num_data_shreds,
+                    pad_bytes,
                 ))
             })
             .ok_or(Error::UnknownProofSize)?;
+        stats.pad_data += pad_bytes;
         common_header_data.shred_variant = ShredVariant::MerkleData {
             proof_size,
             chained,
