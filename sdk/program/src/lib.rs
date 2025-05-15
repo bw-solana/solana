@@ -478,6 +478,8 @@ pub mod blake3;
 #[cfg(feature = "borsh")]
 pub mod borsh;
 #[cfg(feature = "borsh")]
+pub mod borsh0_9;
+#[cfg(feature = "borsh")]
 pub mod borsh0_10;
 #[cfg(feature = "borsh")]
 pub mod borsh1;

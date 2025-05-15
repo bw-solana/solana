@@ -94,7 +94,7 @@ use {
             AbsRequestHandlers, AbsRequestSender, AccountsBackgroundService, DroppedSlotsReceiver,
             PrunedBanksRequestHandler, SnapshotRequestHandler,
         },
-        bank::Bank,
+        bank::{pyth, Bank},
         bank_forks::BankForks,
         commitment::BlockCommitmentCache,
         prioritization_fee_cache::PrioritizationFeeCache,
@@ -1943,6 +1943,10 @@ fn load_blockstore(
     // is processing the dropped banks from the `pruned_banks_receiver` channel.
     let pruned_banks_receiver =
         AccountsBackgroundService::setup_bank_drop_callback(bank_forks.clone());
+
+    for (key_name, pk) in pyth::get_pyth_keys() {
+        info!("Pyth key {}: {}", key_name, pk);
+    }
 
     leader_schedule_cache.set_fixed_leader_schedule(config.fixed_leader_schedule.clone());
     {

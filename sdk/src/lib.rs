@@ -58,7 +58,7 @@ pub use solana_program::{
     unchecked_div_by_const, vote,
 };
 #[cfg(feature = "borsh")]
-pub use solana_program::{borsh, borsh0_10, borsh1};
+pub use solana_program::{borsh, borsh0_9, borsh0_10, borsh1};
 
 pub mod account;
 pub mod account_utils;

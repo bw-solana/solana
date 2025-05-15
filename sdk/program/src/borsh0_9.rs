@@ -1,34 +1,38 @@
 #![allow(clippy::arithmetic_side_effects)]
-//! Utilities for the [borsh] serialization format, version 0.10.
+//! Utilities for the [borsh] serialization format, version 0.9.
+//!
+//! This file is provided for backwards compatibility with types that still use
+//! borsh 0.9, even though this crate canonically uses borsh 0.10.
 //!
 //! [borsh]: https://borsh.io/
-pub use {
+use {
     crate::borsh::{
         impl_get_instance_packed_len, impl_get_packed_len_v0, impl_try_from_slice_unchecked,
     },
-    borsh0_10::maybestd::io,
 };
 
+pub use borsh0_9::{maybestd::io::{self, Error}, BorshDeserialize, BorshSchema, BorshSerialize};
+
 impl_get_packed_len_v0!(
-    borsh0_10,
+    borsh0_9,
     #[deprecated(
-        since = "1.18.0",
+        since = "1.17.0",
         note = "Please upgrade to Borsh 1.X and use `borsh1::get_packed_len` instead"
     )]
 );
 impl_try_from_slice_unchecked!(
-    borsh0_10,
+    borsh0_9,
     io,
     #[deprecated(
-        since = "1.18.0",
+        since = "1.17.0",
         note = "Please upgrade to Borsh 1.X and use `borsh1::try_from_slice_unchecked` instead"
     )]
 );
 impl_get_instance_packed_len!(
-    borsh0_10,
+    borsh0_9,
     io,
     #[deprecated(
-        since = "1.18.0",
+        since = "1.17.0",
         note = "Please upgrade to Borsh 1.X and use `borsh1::get_instance_packed_len` instead"
     )]
 );
@@ -36,6 +40,6 @@ impl_get_instance_packed_len!(
 #[cfg(test)]
 #[allow(deprecated)]
 mod tests {
-    use {crate::borsh::impl_tests, borsh0_10::maybestd::io};
-    impl_tests!(borsh0_10, io);
+    use {crate::borsh::impl_tests, borsh0_9::maybestd::io};
+    impl_tests!(borsh0_9, io);
 }
