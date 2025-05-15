@@ -436,7 +436,7 @@ fn rebatch_and_execute_batches(
 
     if bank
         .feature_set
-        .is_active(&feature_set::apply_cost_tracker_during_replay::id())
+        .is_active(&feature_set::apply_cost_tracker_during_replay::id()) && false
     {
         let mut cost_tracker = bank.write_cost_tracker().unwrap();
         for tx_cost in &tx_costs {
