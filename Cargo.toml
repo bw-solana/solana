@@ -263,6 +263,9 @@ proptest = "1.2"
 prost = "0.11.9"
 prost-types = "0.11.9"
 protobuf-src = "1.1.0"
+pyth-oracle = { git = "https://github.com/pyth-network/pyth-client", rev = "256b57", features = ["library"] }
+pythnet-sdk = { git = "https://github.com/pyth-network/pyth-crosschain", version = "1.13.6", rev = "33f901aa45f4f0005aa5a84a1479b78ca9033074" }
+pyth-price-store = "0.1.0"
 qstring = "0.7.2"
 qualifier_attr = { version = "0.2.2", default-features = false }
 quinn = "0.10.2"
@@ -396,6 +399,7 @@ tar = "0.4.40"
 tarpc = "0.29.0"
 tempfile = "3.8.0"
 test-case = "3.2.1"
+thiserror-impl = "1.0.40"
 thiserror = "1.0.49"
 tiny-bip39 = "0.8.2"
 # Update solana-tokio patch below when updating this version
@@ -422,6 +426,7 @@ zstd = "0.11.2"
 [patch.crates-io]
 # for details, see https://github.com/solana-labs/crossbeam/commit/fd279d707025f0e60951e429bf778b4813d1b6bf
 crossbeam-epoch = { git = "https://github.com/solana-labs/crossbeam", rev = "fd279d707025f0e60951e429bf778b4813d1b6bf" }
+serde_wormhole = { git = "https://github.com/wormhole-foundation/wormhole", tag = "v2.17.1" }
 
 # We include the following crates as our dependencies above from crates.io:
 #
