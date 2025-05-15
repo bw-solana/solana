@@ -40,6 +40,7 @@ use {
             AccountIndex, AccountSecondaryIndexes, AccountSecondaryIndexesIncludeExclude,
             AccountsIndexConfig, IndexLimitMb,
         },
+        bank::pyth::accumulator::{MESSAGE_BUFFER_PID, ORACLE_PID, PRICE_STORE_PID},
         partitioned_rewards::TestPartitionedEpochRewards,
         runtime_config::RuntimeConfig,
         snapshot_config::{SnapshotConfig, SnapshotUsage},
@@ -1901,6 +1902,12 @@ fn process_account_indexes(matches: &ArgMatches) -> AccountSecondaryIndexes {
         })
         .collect();
 
+    assert!(
+        account_indexes.contains(&AccountIndex::ProgramId),
+        "The indexing should be enabled for program-id accounts. Add the following flag:\n\
+        --account-index program-id\n"
+    );
+
     let account_indexes_include_keys: HashSet<Pubkey> =
         values_t!(matches, "account_index_include_key", Pubkey)
             .unwrap_or_default()
@@ -1917,6 +1924,31 @@ fn process_account_indexes(matches: &ArgMatches) -> AccountSecondaryIndexes {
 
     let exclude_keys = !account_indexes_exclude_keys.is_empty();
     let include_keys = !account_indexes_include_keys.is_empty();
+
+    if include_keys
+        && (!account_indexes_include_keys.contains(&*ORACLE_PID)
+            || !account_indexes_include_keys.contains(&*MESSAGE_BUFFER_PID)
+            || !account_indexes_include_keys.contains(&*PRICE_STORE_PID))
+    {
+        panic!(
+                "The oracle program id and message buffer program id must be included in the account index. Add the following flags\n\
+                --account-index-include-key {}\n\
+                --account-index-include-key {}\n\
+                --account-index-include-key {}\n",
+                &*ORACLE_PID, &*MESSAGE_BUFFER_PID, &*PRICE_STORE_PID,
+            );
+    }
+
+    if exclude_keys {
+        for key in &[&*ORACLE_PID, &*MESSAGE_BUFFER_PID, &*PRICE_STORE_PID] {
+            if account_indexes_exclude_keys.contains(key) {
+                panic!(
+                    "This key must *not* be excluded from the account index: {}",
+                    key
+                );
+            }
+        }
+    }
 
     let keys = if !account_indexes.is_empty() && (exclude_keys || include_keys) {
         let account_indexes_keys = AccountSecondaryIndexesIncludeExclude {

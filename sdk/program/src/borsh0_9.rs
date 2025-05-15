@@ -9,6 +9,8 @@ use crate::borsh::{
     impl_get_instance_packed_len, impl_get_packed_len, impl_try_from_slice_unchecked,
 };
 
+pub use borsh0_9::{maybestd::io::Error, BorshDeserialize, BorshSchema, BorshSerialize};
+
 impl_get_packed_len!(
     borsh0_9,
     #[deprecated(
