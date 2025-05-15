@@ -84,7 +84,7 @@ use {
         accounts_db::{AccountShrinkThreshold, AccountsDbConfig},
         accounts_index::AccountSecondaryIndexes,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
-        bank::Bank,
+        bank::{pyth, Bank},
         bank_forks::BankForks,
         commitment::BlockCommitmentCache,
         hardened_unpack::{open_genesis_config, MAX_GENESIS_ARCHIVE_UNPACKED_SIZE},
@@ -1687,6 +1687,10 @@ fn load_blockstore(
         if !hard_forks.is_empty() {
             info!("Hard forks: {:?}", hard_forks);
         }
+    }
+
+    for (key_name, pk) in pyth::get_pyth_keys() {
+        info!("Pyth key {}: {}", key_name, pk);
     }
 
     leader_schedule_cache.set_fixed_leader_schedule(config.fixed_leader_schedule.clone());
