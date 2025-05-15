@@ -40,6 +40,9 @@ num_cpus = { workspace = true }
 num_enum = { workspace = true }
 ouroboros = { workspace = true }
 percentage = { workspace = true }
+pyth-oracle = { workspace = true }
+pythnet-sdk = { workspace = true }
+pyth-price-store = { workspace = true }
 qualifier_attr = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
@@ -74,8 +77,10 @@ static_assertions = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 strum_macros = { workspace = true }
 symlink = { workspace = true }
+syn = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
+thiserror-impl = { workspace = true }
 thiserror = { workspace = true }
 zstd = { workspace = true }
 

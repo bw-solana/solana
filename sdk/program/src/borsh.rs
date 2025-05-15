@@ -8,7 +8,7 @@
 //! be removed in a future release
 //!
 //! [borsh]: https://borsh.io/
-use borsh0_10::{maybestd::io::Error, BorshDeserialize, BorshSchema, BorshSerialize};
+pub use borsh0_10::{maybestd::io::Error, BorshDeserialize, BorshSchema, BorshSerialize};
 
 /// Get the worst-case packed length for the given BorshSchema
 ///
@@ -56,6 +56,7 @@ pub fn get_instance_packed_len<T: BorshSerialize>(instance: &T) -> Result<usize,
     crate::borsh0_10::get_instance_packed_len(instance)
 }
 
+#[macro_export]
 macro_rules! impl_get_packed_len_v0 {
     ($borsh:ident $(,#[$meta:meta])?) => {
         /// Get the worst-case packed length for the given BorshSchema
@@ -116,8 +117,9 @@ macro_rules! impl_get_packed_len_v0 {
         }
     }
 }
-pub(crate) use impl_get_packed_len_v0;
+pub use impl_get_packed_len_v0;
 
+#[macro_export]
 macro_rules! impl_get_packed_len_v1 {
     ($borsh:ident $(,#[$meta:meta])?) => {
         /// Get the worst-case packed length for the given BorshSchema
@@ -178,8 +180,9 @@ macro_rules! impl_get_packed_len_v1 {
         }
     }
 }
-pub(crate) use impl_get_packed_len_v1;
+pub use impl_get_packed_len_v1;
 
+#[macro_export]
 macro_rules! impl_try_from_slice_unchecked {
     ($borsh:ident, $borsh_io:ident $(,#[$meta:meta])?) => {
         /// Deserializes without checking that the entire slice has been consumed
@@ -199,8 +202,10 @@ macro_rules! impl_try_from_slice_unchecked {
         }
     }
 }
-pub(crate) use impl_try_from_slice_unchecked;
 
+pub use impl_try_from_slice_unchecked;
+
+#[macro_export]
 macro_rules! impl_get_instance_packed_len {
     ($borsh:ident, $borsh_io:ident $(,#[$meta:meta])?) => {
         /// Helper struct which to count how much data would be written during serialization
@@ -235,7 +240,7 @@ macro_rules! impl_get_instance_packed_len {
         }
     }
 }
-pub(crate) use impl_get_instance_packed_len;
+pub use impl_get_instance_packed_len;
 
 #[cfg(test)]
 macro_rules! impl_tests {

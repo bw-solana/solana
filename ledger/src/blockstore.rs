@@ -320,8 +320,6 @@ impl Blockstore {
                 .blockstore_directory(),
         );
 
-        adjust_ulimit_nofile(options.enforce_ulimit_nofile)?;
-
         // Open the database
         let mut measure = Measure::start("blockstore open");
         info!("Opening blockstore at {:?}", blockstore_path);
@@ -5101,11 +5099,13 @@ pub fn make_chaining_slot_entries(
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)] // No longer called.
 fn adjust_ulimit_nofile(_enforce_ulimit_nofile: bool) -> Result<()> {
     Ok(())
 }
 
 #[cfg(unix)]
+#[allow(dead_code)] // No longer called.
 fn adjust_ulimit_nofile(enforce_ulimit_nofile: bool) -> Result<()> {
     // Rocks DB likes to have many open files.  The default open file descriptor limit is
     // usually not enough
