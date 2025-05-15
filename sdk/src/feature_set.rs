@@ -34,7 +34,7 @@ pub mod deprecate_rewards_sysvar {
 }
 
 pub mod pico_inflation {
-    solana_sdk::declare_id!("4RWNif6C2WCNiKVW7otP4G7dkmkHGyKQWRpuZ1pxKU5m");
+    solana_sdk::declare_id!("A579xbPX81jaZrJc2oM7PoHDTTpmjZ3Xs6rjAAB3MiSC");
 }
 
 pub mod full_inflation {
@@ -45,10 +45,10 @@ pub mod full_inflation {
     pub mod mainnet {
         pub mod certusone {
             pub mod vote {
-                solana_sdk::declare_id!("BzBBveUDymEYoYzcMWNQCx3cd4jQs7puaVFHLtsbB6fm");
+                solana_sdk::declare_id!("Gu5gUs8vAHdyypFwhwcv637mTMwS9JqRvRegonbV89tZ");
             }
             pub mod enable {
-                solana_sdk::declare_id!("7XRJcS5Ud5vxGB54JbK9N2vBZVwnwdBNeJW1ibRgD9gx");
+                solana_sdk::declare_id!("8bDRKSbzRGbmjYFVCSSM3BVmRMY29HFKWF9TSAYgCza2");
             }
         }
     }
@@ -119,7 +119,7 @@ pub mod libsecp256k1_0_5_upgrade_enabled {
 }
 
 pub mod tx_wide_compute_cap {
-    solana_sdk::declare_id!("5ekBxc8itEnPv4NzGJtr8BVVQLNMQuLMNQQj7pHoLNZ9");
+    solana_sdk::declare_id!("HmECuHFFGc2YgvneMZCm4vfAxNNxGmmyNoGQkp4ZF1CY");
 }
 
 pub mod spl_token_v2_set_authority_fix {
@@ -143,7 +143,7 @@ pub mod zk_token_sdk_enabled {
 }
 
 pub mod curve25519_syscall_enabled {
-    solana_sdk::declare_id!("7rcw5UtqgDTBBv2EcynNfYckgdAaH1MAsCjKgXMkN7Ri");
+    solana_sdk::declare_id!("66ieqxZbpqhmNfRoyf3c5JPTJQT981qGQ2CsxNcCmVn6");
 }
 
 pub mod versioned_tx_message_enabled {
@@ -151,7 +151,7 @@ pub mod versioned_tx_message_enabled {
 }
 
 pub mod libsecp256k1_fail_on_bad_count {
-    solana_sdk::declare_id!("8aXvSuopd1PUj7UhehfXJRg6619RHp8ZvwTyyJHdUYsj");
+    solana_sdk::declare_id!("8rKtvAe1rby1beDAAL8EfBbHWruHbT1wXUWdfrpPmxYB");
 }
 
 pub mod libsecp256k1_fail_on_bad_count2 {
@@ -183,7 +183,7 @@ pub mod return_data_syscall_enabled {
 }
 
 pub mod reduce_required_deploy_balance {
-    solana_sdk::declare_id!("EBeznQDjcPG8491sFsKZYBi5S5jTVXMpAKNDJMQPS2kq");
+    solana_sdk::declare_id!("FTLPGrvfUNBd997x2yPcBS9P7W5DgPjT78EvUb2rRGNG");
 }
 
 pub mod sol_log_data_syscall_enabled {
@@ -432,27 +432,27 @@ pub mod vote_state_update_credit_per_dequeue {
 }
 
 pub mod quick_bail_on_panic {
-    solana_sdk::declare_id!("DpJREPyuMZ5nDfU6H3WTqSqUFSXAfw8u7xqmWtEwJDcP");
+    solana_sdk::declare_id!("FUbZwUVdqEqZ7ti5nBW9AdawVF5yKiYPjGAXQdskUiPb");
 }
 
 pub mod nonce_must_be_authorized {
-    solana_sdk::declare_id!("HxrEu1gXuH7iD3Puua1ohd5n4iUKJyFNtNxk9DVJkvgr");
+    solana_sdk::declare_id!("75vtZgqiXmrAzZq7m8uGLeL374p6CihgqFixoSpfGSH5");
 }
 
 pub mod nonce_must_be_advanceable {
-    solana_sdk::declare_id!("3u3Er5Vc2jVcwz4xr2GJeSAXT3fAj6ADHZ4BJMZiScFd");
+    solana_sdk::declare_id!("7eUz9MMA7pdRsdpPLPDXBTcU3ZHQHra8pxX7S7us6WoF");
 }
 
 pub mod vote_authorize_with_seed {
-    solana_sdk::declare_id!("6tRxEYKuy2L5nnv5bgn7iT28MxUbYxp5h7F3Ncf1exrT");
+    solana_sdk::declare_id!("AYw57Po4by3dc1Qjk2JEa3PHQL4G1ZmDR52RrNQcdLx");
 }
 
 pub mod cap_accounts_data_size_per_block {
-    solana_sdk::declare_id!("qywiJyZmqTKspFg2LeuUHqcA5nNvBgobqb9UprywS9N");
+    solana_sdk::declare_id!("7hLxs8BSuwrbt2YRy8uu22KdfiUAveNtkZuYveUJSvoT");
 }
 
 pub mod preserve_rent_epoch_for_rent_exempt_accounts {
-    solana_sdk::declare_id!("HH3MUYReL2BvqqA3oEcAa7txju5GY6G4nxJ51zvsEjEZ");
+    solana_sdk::declare_id!("3f5Mqo7mYR9yF9CX8TTwkJJLwpZ1N7NaMMT698JRRvmA");
 }
 
 pub mod enable_bpf_loader_extend_program_ix {
@@ -468,7 +468,7 @@ pub mod skip_rent_rewrites {
 }
 
 pub mod prevent_crediting_accounts_that_end_rent_paying {
-    solana_sdk::declare_id!("812kqX67odAp5NFwM8D2N24cku7WTm9CHUTFUXaDkWPn");
+    solana_sdk::declare_id!("DrJJTpBzK79CybFcJzoouK4hTdukeVVNrXYRgfKxFMq2");
 }
 
 pub mod cap_bpf_program_instruction_accounts {
@@ -536,7 +536,7 @@ pub mod disable_rehash_for_rent_epoch {
 }
 
 pub mod increase_tx_account_lock_limit {
-    solana_sdk::declare_id!("9LZdXeKGeBV6hRLdxS1rHbHoEUsKqesCC2ZAPTPKJAbK");
+    solana_sdk::declare_id!("DNevAsHzWEUPoWLyjYHXGhTdW8RcYBvfAnqceCZiwWUi");
 }
 
 pub mod limit_max_instruction_trace_length {
@@ -544,7 +544,7 @@ pub mod limit_max_instruction_trace_length {
 }
 
 pub mod check_syscall_outputs_do_not_overlap {
-    solana_sdk::declare_id!("3uRVPBpyEJRo1emLCrq38eLRFGcu6uKSpUXqGvU8T7SZ");
+    solana_sdk::declare_id!("H67Z9He7kpCDoPxEeZ8xAxrve8yEVQQAnwfaqSEDzVCL");
 }
 
 pub mod enable_bpf_loader_set_authority_checked_ix {
@@ -560,27 +560,27 @@ pub mod enable_program_redeployment_cooldown {
 }
 
 pub mod commission_updates_only_allowed_in_first_half_of_epoch {
-    solana_sdk::declare_id!("noRuG2kzACwgaY7TVmLRnUNPLKNVQE1fb7X55YWBehp");
+    solana_sdk::declare_id!("E6rDA5RUsa3ZhYhJp2mcShBKXuShtXthhTmBq94kvwgS");
 }
 
 pub mod enable_turbine_fanout_experiments {
-    solana_sdk::declare_id!("D31EFnLgdiysi84Woo3of4JMu7VmasUS3Z7j9HYXCeLY");
+    solana_sdk::declare_id!("4t7QJoFPkKMLPnrFAZSUfVzFy9U9sepKNPgPpJBTQddK");
 }
 
 pub mod disable_turbine_fanout_experiments {
-    solana_sdk::declare_id!("Gz1aLrbeQ4Q6PTSafCZcGWZXz91yVRi7ASFzFEr1U4sa");
+    solana_sdk::declare_id!("8itcsMBnAGyv8eHQ7a4Em7Q6shhEbZVYhNFZgiarn2qF");
 }
 
 pub mod drop_merkle_shreds {
-    solana_sdk::declare_id!("84zy5N23Q9vTZuLc9h1HWUtyM9yCFV2SCmyP9W9C3yHZ");
+    solana_sdk::declare_id!("8ZQ79zGsRta1WaaKWuRhPjtgkNZTbXgXR5SAAhMxqHxk");
 }
 
 pub mod keep_merkle_shreds {
-    solana_sdk::declare_id!("HyNQzc7TMNmRhpVHXqDGjpsHzeQie82mDQXSF9hj7nAH");
+    solana_sdk::declare_id!("H6Z89nNxHd8wXfajrArDVzNtDVwiv8kE9HjcX1WdJ6jQ");
 }
 
 pub mod move_serialized_len_ptr_in_cpi {
-    solana_sdk::declare_id!("74CoWuBmt3rUVUrCb2JiSTvh6nXyBWUsK4SaMj3CtE3T");
+    solana_sdk::declare_id!("47yqd5yWv395TfqcBbgNUxr765Ycb3FdP42D27pCeGME");
 }
 
 pub mod update_hashes_per_tick {
@@ -871,6 +871,12 @@ lazy_static! {
         (revise_turbine_epoch_stakes::id(), "revise turbine epoch stakes"),
         (require_rent_exempt_split_destination::id(), "Require stake split destination account to be rent exempt"),
         (better_error_codes_for_tx_lamport_check::id(), "better error codes for tx lamport check #33353"),
+        (enable_accumulator_sysvar::id(), "enable accumulator sysvar #<GH_ISSUE_NUMBER>"),
+        (move_accumulator_to_end_of_block::id(), "move accumulator to end of block #<GH_ISSUE_NUMBER>"),
+        (zero_wormhole_message_timestamps::id(), "use zeroed timestamps in wormhole messages"),
+        (undo_move_accumulator_to_end_of_block::id(), "undo accumulator end of block change"),
+        (redo_move_accumulator_to_end_of_block::id(), "redo accumulator end of block change"),
+        (add_publisher_stake_caps_to_the_accumulator::id(), "add publisher stake caps to the accumulator")
         /*************** ADD NEW FEATURES HERE ***************/
     ]
     .iter()
