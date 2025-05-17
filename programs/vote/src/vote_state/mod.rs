@@ -726,7 +726,7 @@ pub fn process_new_vote_state(
         // Award vote credits based on the number of slots that were voted on and have reached finality
         // For each finalized slot, there was one voted-on slot in the new vote state that was responsible for
         // finalizing it. Each of those votes is awarded 1 credit.
-        vote_state.increment_credits(epoch, earned_credits);
+        vote_state.increment_credits(epoch, 1);
     }
     if let Some(timestamp) = timestamp {
         let last_slot = new_state.back().unwrap().slot();
