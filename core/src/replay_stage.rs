@@ -2564,14 +2564,16 @@ impl ReplayStage {
             Some(authorized_voter_keypair) => authorized_voter_keypair,
         };
 
-        // Send our last few votes along with the new one
-        // Compact the vote state update before sending
-        let vote = match vote {
-            VoteTransaction::VoteStateUpdate(vote_state_update) => {
+        let should_compact = bank
+            .feature_set
+            .is_active(&feature_set::compact_vote_state_updates::id());
+        let vote = match (should_compact, vote) {
+            (true, VoteTransaction::VoteStateUpdate(vote_state_update)) => {
                 VoteTransaction::CompactVoteStateUpdate(vote_state_update)
             }
-            vote => vote,
+            (_, vote) => vote,
         };
+
         let vote_ix = switch_fork_decision
             .to_vote_instruction(
                 vote,

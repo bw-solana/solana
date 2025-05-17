@@ -54,13 +54,11 @@ impl Bank {
     // Ref: distribute_rent_to_validators
     pub(super) fn distribute_transaction_fees(&self) {
         let collector_fees = self.collector_fees.load(Relaxed);
-        if collector_fees != 0 {
-            let (deposit, mut burn) = self.calculate_reward_and_burn_fees(collector_fees);
-            if deposit > 0 {
-                self.deposit_or_burn_fee(deposit, &mut burn);
-            }
-            self.capitalization.fetch_sub(burn, Relaxed);
+        let (deposit, mut burn) = self.calculate_reward_and_burn_fees(collector_fees);
+        if deposit > 0 {
+            self.deposit_or_burn_fee(deposit, &mut burn);
         }
+        self.capitalization.fetch_sub(burn, Relaxed);
     }
 
     // Replace `distribute_transaction_fees()` after Feature Gate: Reward full priority fee to
@@ -130,15 +128,17 @@ impl Bank {
             },
         ) {
             Ok(post_balance) => {
-                self.rewards.write().unwrap().push((
-                    self.collector_id,
-                    RewardInfo {
-                        reward_type: RewardType::Fee,
-                        lamports: deposit as i64,
-                        post_balance,
-                        commission: None,
-                    },
-                ));
+                if deposit != 0 {
+                    self.rewards.write().unwrap().push((
+                        self.collector_id,
+                        RewardInfo {
+                            reward_type: RewardType::Fee,
+                            lamports: deposit as i64,
+                            post_balance,
+                            commission: None,
+                        },
+                    ));
+                }
             }
             Err(err) => {
                 debug!(
