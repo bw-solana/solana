@@ -49,17 +49,17 @@ impl Bank {
         let collector_fees = self.collector_fees.load(Relaxed);
         if collector_fees != 0 {
             let (deposit, mut burn) = self.fee_rate_governor.burn(collector_fees);
-            if deposit > 0 {
-                let validate_fee_collector = self.validate_fee_collector_account();
-                match self.deposit_fees(
-                    &self.collector_id,
-                    deposit,
-                    DepositFeeOptions {
-                        check_account_owner: validate_fee_collector,
-                        check_rent_paying: validate_fee_collector,
-                    },
-                ) {
-                    Ok(post_balance) => {
+            let validate_fee_collector = self.validate_fee_collector_account();
+            match self.deposit_fees(
+                &self.collector_id,
+                deposit,
+                DepositFeeOptions {
+                    check_account_owner: validate_fee_collector,
+                    check_rent_paying: validate_fee_collector,
+                },
+            ) {
+                Ok(post_balance) => {
+                    if deposit != 0 {
                         self.rewards.write().unwrap().push((
                             self.collector_id,
                             RewardInfo {
@@ -70,19 +70,19 @@ impl Bank {
                             },
                         ));
                     }
-                    Err(err) => {
-                        debug!(
-                            "Burned {} lamport tx fee instead of sending to {} due to {}",
-                            deposit, self.collector_id, err
-                        );
-                        datapoint_warn!(
-                            "bank-burned_fee",
-                            ("slot", self.slot(), i64),
-                            ("num_lamports", deposit, i64),
-                            ("error", err.to_string(), String),
-                        );
-                        burn += deposit;
-                    }
+                }
+                Err(err) => {
+                    debug!(
+                        "Burned {} lamport tx fee instead of sending to {} due to {}",
+                        deposit, self.collector_id, err
+                    );
+                    datapoint_warn!(
+                        "bank-burned_fee",
+                        ("slot", self.slot(), i64),
+                        ("num_lamports", deposit, i64),
+                        ("error", err.to_string(), String),
+                    );
+                    burn += deposit;
                 }
             }
             self.capitalization.fetch_sub(burn, Relaxed);
