@@ -1237,7 +1237,7 @@ pub fn should_discard_shred(
     }
     match shred_variant {
         ShredVariant::LegacyCode | ShredVariant::LegacyData => {
-            return true;
+            return false;
         }
         ShredVariant::MerkleCode { chained: false, .. } => {
             stats.num_shreds_merkle_code = stats.num_shreds_merkle_code.saturating_add(1);
