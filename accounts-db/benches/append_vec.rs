@@ -7,6 +7,7 @@ use {
         account_storage::meta::{
             StorableAccountsWithHashesAndWriteVersions, StoredAccountInfo, StoredMeta,
         },
+        accounts_db::INCLUDE_SLOT_IN_HASH_TESTS,
         accounts_hash::AccountHash,
         append_vec::{
             test_utils::{create_test_account, get_append_vec_path},
@@ -38,7 +39,7 @@ fn append_account(
     let slot_ignored = Slot::MAX;
     let accounts = [(&storage_meta.pubkey, account)];
     let slice = &accounts[..];
-    let accounts = (slot_ignored, slice);
+    let accounts = (slot_ignored, slice, INCLUDE_SLOT_IN_HASH_TESTS);
     let storable_accounts =
         StorableAccountsWithHashesAndWriteVersions::new_with_hashes_and_write_versions(
             &accounts,

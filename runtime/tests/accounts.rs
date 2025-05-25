@@ -3,7 +3,7 @@ use {
     rand::{thread_rng, Rng},
     rayon::prelude::*,
     solana_accounts_db::{
-        accounts_db::{AccountsDb, LoadHint},
+        accounts_db::{AccountsDb, LoadHint, INCLUDE_SLOT_IN_HASH_TESTS},
         ancestors::Ancestors,
     },
     solana_sdk::{
@@ -59,7 +59,14 @@ fn test_shrink_and_clean() {
             for (pubkey, account) in alive_accounts.iter_mut() {
                 account.checked_sub_lamports(1).unwrap();
 
-                accounts.store_cached((current_slot, &[(&*pubkey, &*account)][..]), None);
+                accounts.store_cached(
+                    (
+                        current_slot,
+                        &[(&*pubkey, &*account)][..],
+                        INCLUDE_SLOT_IN_HASH_TESTS,
+                    ),
+                    None,
+                );
             }
             accounts.add_root(current_slot);
             accounts.flush_accounts_cache(true, Some(current_slot));
@@ -125,13 +132,16 @@ fn test_bad_bank_hash() {
             .iter()
             .map(|idx| (&accounts_keys[*idx].0, &accounts_keys[*idx].1))
             .collect();
-        db.store_cached((some_slot, &account_refs[..]), None);
+        db.store_cached(
+            (some_slot, &account_refs[..], INCLUDE_SLOT_IN_HASH_TESTS),
+            None,
+        );
         for pass in 0..2 {
             for (key, account) in &account_refs {
                 assert_eq!(
                     db.load_account_hash(&ancestors, key, Some(some_slot), LoadHint::Unspecified)
                         .unwrap(),
-                    AccountsDb::hash_account(*account, key)
+                    AccountsDb::hash_account(some_slot, *account, key, INCLUDE_SLOT_IN_HASH_TESTS)
                 );
             }
             if pass == 0 {

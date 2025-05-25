@@ -6494,26 +6494,26 @@ fn test_bank_hash_consistency() {
         if bank.slot == 0 {
             assert_eq!(
                 bank.hash().to_string(),
-                "3KE2bigpBiiMLGYNqmWkgbrQGSqMt5ccG6ED87CFCVpt",
+                "3kzRo3M5q9j47Dxfdp9ZeEXfUTA5rxVud7jRKuttHxFz"
             );
         }
 
         if bank.slot == 32 {
             assert_eq!(
                 bank.hash().to_string(),
-                "FpNDsd21HXznXf6tRpMNiWhFyhZ4aCCECQm3gL4jGV22",
+                "bWPR5AQjsfhMypn1nLUjugmitbjHwV4rmnyTDFqCdv1"
             );
         }
         if bank.slot == 64 {
             assert_eq!(
                 bank.hash().to_string(),
-                "7gDCoXPfFtKPALi212akhhQHEuLdAqyf7DE3yUN4bR2p",
+                "74hNYEVcvKU5JZwSNBYUcUWgf9Jw2Mag4b55967VPVjG"
             );
         }
         if bank.slot == 128 {
             assert_eq!(
                 bank.hash().to_string(),
-                "6FREbeHdTNYnEXg4zobL2mqGfevukg75frkQJqKpYnk4",
+                "BvYViztQiksU8vDvMqZYBo9Lc4cgjJEmijPpqktBRMkS"
             );
             break;
         }
@@ -12572,7 +12572,7 @@ fn test_epoch_credit_rewards_and_history_update() {
         .map(|_| StakeReward::new_random())
         .collect::<Vec<_>>();
 
-    bank.store_accounts((bank.slot(), &stake_rewards[..]));
+    bank.store_accounts((bank.slot(), &stake_rewards[..], bank.include_slot_in_hash()));
 
     // Simulate rewards
     let mut expected_rewards = 0;

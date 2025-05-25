@@ -10,7 +10,7 @@ use {
         accounts_db::{
             test_utils::{create_test_accounts, update_accounts_bench},
             AccountShrinkThreshold, AccountsDb, CalcAccountsHashDataSource,
-            ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS,
+            ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS, INCLUDE_SLOT_IN_HASH_TESTS,
         },
         accounts_index::AccountSecondaryIndexes,
         ancestors::Ancestors,
@@ -139,6 +139,7 @@ fn main() {
                 &EpochSchedule::default(),
                 &RentCollector::default(),
                 true,
+                INCLUDE_SLOT_IN_HASH_TESTS,
             );
             time_store.stop();
             if results != results_store {

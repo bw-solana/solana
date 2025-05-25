@@ -8,7 +8,7 @@ use {
     log::*,
     solana_accounts_db::{
         accounts::Accounts,
-        accounts_db::{AccountStorageEntry, AccountsDb},
+        accounts_db::{AccountStorageEntry, AccountsDb, IncludeSlotInHash, INCLUDE_SLOT_IN_HASH_TESTS},
         accounts_hash::{AccountsHash, AccountsHashKind},
         epoch_accounts_hash::EpochAccountsHash,
         rent_collector::RentCollector,
@@ -36,6 +36,7 @@ pub struct AccountsPackage {
     pub epoch_schedule: EpochSchedule,
     pub rent_collector: RentCollector,
     pub is_incremental_accounts_hash_feature_enabled: bool,
+    pub include_slot_in_hash: IncludeSlotInHash,
 
     /// Supplemental information needed for snapshots
     pub snapshot_info: Option<SupplementalSnapshotInfo>,
@@ -152,6 +153,7 @@ impl AccountsPackage {
             epoch_schedule: bank.epoch_schedule().clone(),
             rent_collector: bank.rent_collector().clone(),
             is_incremental_accounts_hash_feature_enabled,
+            include_slot_in_hash: bank.include_slot_in_hash(),
             snapshot_info,
             enqueued: Instant::now(),
         }
@@ -173,6 +175,7 @@ impl AccountsPackage {
             epoch_schedule: EpochSchedule::default(),
             rent_collector: RentCollector::default(),
             is_incremental_accounts_hash_feature_enabled: bool::default(),
+            include_slot_in_hash: INCLUDE_SLOT_IN_HASH_TESTS,
             snapshot_info: Some(SupplementalSnapshotInfo {
                 bank_snapshot_dir: PathBuf::default(),
                 archive_format: ArchiveFormat::Tar,
