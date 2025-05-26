@@ -7126,6 +7126,8 @@ impl Bank {
     /// The epoch accounts hash is hashed into the bank's hash once per epoch at a predefined slot.
     /// Should it be included in *this* bank?
     fn should_include_epoch_accounts_hash(&self) -> bool {
+        return false;
+        
         if !epoch_accounts_hash_utils::is_enabled_this_epoch(self) {
             return false;
         }
