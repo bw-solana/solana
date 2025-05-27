@@ -19,7 +19,7 @@ use {
     },
     solana_download_utils::download_snapshot_archive,
     solana_entry::entry::create_ticks,
-    solana_gossip::gossip_service::discover_cluster,
+    solana_gossip::{contact_info::LegacyContactInfo, gossip_service::discover_cluster},
     solana_ledger::{
         ancestor_iterator::AncestorIterator,
         bank_forks_utils,
@@ -215,7 +215,12 @@ fn test_local_cluster_signature_subscribe() {
         .unwrap();
     let non_bootstrap_info = cluster.get_contact_info(&non_bootstrap_id).unwrap();
 
-    let tx_client = cluster.build_tpu_quic_client().unwrap();
+    let (rpc, tpu) = LegacyContactInfo::try_from(non_bootstrap_info)
+        .map(|node| {
+            cluster_tests::get_client_facing_addr(cluster.connection_cache.protocol(), node)
+        })
+        .unwrap();
+    let tx_client = ThinClient::new(rpc, tpu, cluster.connection_cache.clone());
 
     let (blockhash, _) = tx_client
         .rpc_client()
@@ -392,7 +397,7 @@ fn test_restart_node() {
         slots_per_epoch,
     );
     cluster_tests::send_many_transactions(
-        &cluster.entry_point_info,
+        &LegacyContactInfo::try_from(&cluster.entry_point_info).unwrap(),
         &cluster.funding_keypair,
         &cluster.connection_cache,
         10,
@@ -424,7 +429,12 @@ fn test_mainnet_beta_cluster_type() {
     .unwrap();
     assert_eq!(cluster_nodes.len(), 1);
 
-    let client = cluster.build_tpu_quic_client().unwrap();
+    let (rpc, tpu) = LegacyContactInfo::try_from(&cluster.entry_point_info)
+        .map(|node| {
+            cluster_tests::get_client_facing_addr(cluster.connection_cache.protocol(), node)
+        })
+        .unwrap();
+    let client = ThinClient::new(rpc, tpu, cluster.connection_cache.clone());
 
     // Programs that are available at epoch 0
     for program_id in [
@@ -1436,7 +1446,7 @@ fn test_snapshots_restart_validity() {
         // forwarded to and processed.
         trace!("Sending transactions");
         let new_balances = cluster_tests::send_many_transactions(
-            &cluster.entry_point_info,
+            &LegacyContactInfo::try_from(&cluster.entry_point_info).unwrap(),
             &cluster.funding_keypair,
             &cluster.connection_cache,
             10,
@@ -2664,7 +2674,12 @@ fn test_oc_bad_signatures() {
     );
 
     // 3) Start up a spy to listen for and push votes to leader TPU
-    let client = cluster.build_tpu_quic_client().unwrap();
+    let (rpc, tpu) = LegacyContactInfo::try_from(&cluster.entry_point_info)
+        .map(|node| {
+            cluster_tests::get_client_facing_addr(cluster.connection_cache.protocol(), node)
+        })
+        .unwrap();
+    let client = ThinClient::new(rpc, tpu, cluster.connection_cache.clone());
     let cluster_funding_keypair = cluster.funding_keypair.insecure_clone();
     let voter_thread_sleep_ms: usize = 100;
     let num_votes_simulated = Arc::new(AtomicUsize::new(0));
@@ -5688,7 +5703,6 @@ fn test_randomly_mixed_block_verification_methods_between_bootstrap_and_not() {
 
 /// Forks previous marked invalid should be marked as such in fork choice on restart
 #[test]
-#[ignore]
 #[serial]
 fn test_invalid_forks_persisted_on_restart() {
     solana_logger::setup_with("info,solana_metrics=off,solana_ledger=off");
