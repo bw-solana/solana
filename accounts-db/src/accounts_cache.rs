@@ -65,11 +65,12 @@ impl SlotCacheInner {
         self.cache.iter().map(|item| *item.key()).collect()
     }
 
-    pub fn insert(&self, pubkey: &Pubkey, account: AccountSharedData) -> CachedAccount {
+    pub fn insert(&self, pubkey: &Pubkey, account: AccountSharedData, slot: Slot,) -> CachedAccount {
         let data_len = account.data().len() as u64;
         let item = Arc::new(CachedAccountInner {
             account,
             hash: SeqLock::new(None),
+            slot,
             pubkey: *pubkey,
         });
         if let Some(old) = self.cache.insert(*pubkey, item.clone()) {
@@ -134,6 +135,7 @@ pub type CachedAccount = Arc<CachedAccountInner>;
 pub struct CachedAccountInner {
     pub account: AccountSharedData,
     hash: SeqLock<Option<AccountHash>>,
+    slot: Slot,
     pubkey: Pubkey,
 }
 
@@ -143,7 +145,7 @@ impl CachedAccountInner {
         match hash {
             Some(hash) => hash,
             None => {
-                let hash = AccountsDb::hash_account(&self.account, &self.pubkey);
+                let hash = AccountsDb::hash_account(self.slot, &self.account, &self.pubkey);
                 *self.hash.lock_write() = Some(hash);
                 hash
             }
@@ -220,7 +222,7 @@ impl AccountsCache {
                 .or_insert(self.new_inner())
                 .clone());
 
-        slot_cache.insert(pubkey, account)
+        slot_cache.insert(pubkey, account, slot)
     }
 
     pub fn load(&self, slot: Slot, pubkey: &Pubkey) -> Option<CachedAccount> {

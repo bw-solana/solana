@@ -38,7 +38,7 @@ fn bench_hash_account(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(num_bytes as u64));
         let account = AccountSharedData::new(lamports, data_size, &owner);
         group.bench_function(BenchmarkId::new("data_size", data_size), |b| {
-            b.iter(|| AccountsDb::hash_account(&account, &address));
+            b.iter(|| AccountsDb::hash_account(0, &account, &address));
         });
     }
 }

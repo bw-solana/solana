@@ -2376,6 +2376,7 @@ impl<'a> AppendVecScan for ScanState<'a> {
         let hash_is_missing = account_hash == AccountHash(Hash::default());
         if hash_is_missing {
             let computed_hash = AccountsDb::hash_account_data(
+                self.current_slot,
                 loaded_account.lamports(),
                 loaded_account.owner(),
                 loaded_account.executable(),
@@ -6207,8 +6208,9 @@ impl AccountsDb {
         }
     }
 
-    pub fn hash_account<T: ReadableAccount>(account: &T, pubkey: &Pubkey) -> AccountHash {
+    pub fn hash_account<T: ReadableAccount>(slot: u64, account: &T, pubkey: &Pubkey) -> AccountHash {
         Self::hash_account_data(
+            slot,
             account.lamports(),
             account.owner(),
             account.executable(),
@@ -6219,6 +6221,7 @@ impl AccountsDb {
     }
 
     fn hash_account_data(
+        slot: u64,
         lamports: u64,
         owner: &Pubkey,
         executable: bool,
@@ -6240,6 +6243,7 @@ impl AccountsDb {
 
         // collect lamports, rent_epoch into buffer to hash
         buffer.extend_from_slice(&lamports.to_le_bytes());
+        buffer.extend_from_slice(&slot.to_le_bytes());
         buffer.extend_from_slice(&rent_epoch.to_le_bytes());
 
         if data.len() > DATA_SIZE {
@@ -6888,6 +6892,7 @@ impl AccountsDb {
                                                 loaded_hash == AccountHash(Hash::default());
                                             if hash_is_missing {
                                                 let computed_hash = Self::hash_account_data(
+                                                    slot,
                                                     loaded_account.lamports(),
                                                     loaded_account.owner(),
                                                     loaded_account.executable(),
@@ -7788,6 +7793,7 @@ impl AccountsDb {
                     let mut loaded_hash = loaded_account.loaded_hash();
                     if loaded_hash == AccountHash(Hash::default()) {
                         loaded_hash = Self::hash_account_data(
+                            slot,
                             loaded_account.lamports(),
                             loaded_account.owner(),
                             loaded_account.executable(),
@@ -7833,7 +7839,7 @@ impl AccountsDb {
                 let key = *loaded_account.pubkey();
                 let account = loaded_account.take_account();
                 if loaded_hash == AccountHash(Hash::default()) {
-                    loaded_hash = Self::hash_account(&account, &key)
+                    loaded_hash = Self::hash_account(slot, &account, &key)
                 }
                 accum.insert(key, (loaded_hash, account));
             },
@@ -10409,7 +10415,7 @@ pub mod tests {
                 1,
                 AccountSharedData::default().owner(),
             ));
-            let hash = AccountsDb::hash_account(&raw_accounts[i], &raw_expected[i].pubkey);
+            let hash = AccountsDb::hash_account(slot, &raw_accounts[i], &raw_expected[i].pubkey);
             assert_eq!(hash, expected_hashes[i]);
             raw_expected[i].hash = hash;
         }
@@ -12504,12 +12510,12 @@ pub mod tests {
             AccountHash(Hash::from_str("4xuaE8UfH8EYsPyDZvJXUScoZSyxUJf2BpzVMLTFh497").unwrap());
 
         assert_eq!(
-            AccountsDb::hash_account(&stored_account, stored_account.pubkey(),),
+            AccountsDb::hash_account(0, &stored_account, stored_account.pubkey(),),
             expected_account_hash,
             "StoredAccountMeta's data layout might be changed; update hashing if needed."
         );
         assert_eq!(
-            AccountsDb::hash_account(&account, stored_account.pubkey(),),
+            AccountsDb::hash_account(0, &account, stored_account.pubkey(),),
             expected_account_hash,
             "Account-based hashing must be consistent with StoredAccountMeta-based one."
         );
@@ -17996,7 +18002,7 @@ pub mod tests {
         // Ensure the zero-lamport accounts are NOT included in the full accounts hash.
         let full_account_hashes = [(2, 0), (3, 0), (4, 1)].into_iter().map(|(index, _slot)| {
             let (pubkey, account) = &accounts[index];
-            AccountsDb::hash_account(account, pubkey).0
+            AccountsDb::hash_account(0, account, pubkey).0
         });
         let expected_accounts_hash = AccountsHash(compute_merkle_root(full_account_hashes));
         assert_eq!(full_accounts_hash.0, expected_accounts_hash);
@@ -18076,7 +18082,7 @@ pub mod tests {
                         let hash = blake3::hash(bytemuck::bytes_of(pubkey));
                         Hash::new_from_array(hash.into())
                     } else {
-                        AccountsDb::hash_account(account, pubkey).0
+                        AccountsDb::hash_account(0, account, pubkey).0
                     }
                 });
         let expected_accounts_hash =

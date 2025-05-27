@@ -150,7 +150,7 @@ fn test_bad_bank_hash() {
                             LoadHint::Unspecified
                         )
                         .unwrap(),
-                        AccountsDb::hash_account(*account, key)
+                        AccountsDb::hash_account(0, *account, key)
                     );
                 }
             }

@@ -4310,8 +4310,8 @@ impl Bank {
                     .accounts
                     .load_to_collect_rent_eagerly(&self.ancestors, pubkey_range)
             })
-            .map(|(pubkey, account, _slot)| {
-                let account_hash = AccountsDb::hash_account(&account, &pubkey);
+            .map(|(pubkey, account, slot)| {
+                let account_hash = AccountsDb::hash_account(slot, &account, &pubkey);
                 (pubkey, account_hash, account)
             })
     }
@@ -4542,7 +4542,7 @@ impl Bank {
                 // This is what consensus requires prior to activation of bank_hash_skips_rent_rewrites.
                 // This code path exists to allow us to test the long term effects on validators when the skipped rewrites
                 // feature is enabled.
-                let hash = AccountsDb::hash_account(account, pubkey);
+                let hash = AccountsDb::hash_account(self.slot(), account, pubkey);
                 skipped_rewrites.push((*pubkey, hash));
             }
             rent_debits.insert(pubkey, rent_collected_info.rent_amount, account.lamports());
