@@ -88,7 +88,7 @@ pub fn collect_rent_from_account(
                 account.rent_epoch(),
             ) == RentDue::Exempt
         {
-            account.set_rent_epoch(RENT_EXEMPT_RENT_EPOCH);
+            //account.set_rent_epoch(RENT_EXEMPT_RENT_EPOCH);
         }
 
         CollectedInfo::default()
@@ -275,7 +275,7 @@ fn load_transaction_accounts<CB: TransactionProcessingCallback>(
                             // All new accounts must be rent-exempt (enforced in Bank::execute_loaded_transaction).
                             // Currently, rent collection sets rent_epoch to u64::MAX, but initializing the account
                             // with this field already set would allow us to skip rent collection for these accounts.
-                            default_account.set_rent_epoch(RENT_EXEMPT_RENT_EPOCH);
+                            //default_account.set_rent_epoch(RENT_EXEMPT_RENT_EPOCH);
                             (default_account.data().len(), default_account, 0)
                         })
                 };

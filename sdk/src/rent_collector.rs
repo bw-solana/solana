@@ -121,7 +121,7 @@ impl RentCollector {
     ) -> CollectedInfo {
         match self.calculate_rent_result(address, account) {
             RentResult::Exempt => {
-                account.set_rent_epoch(RENT_EXEMPT_RENT_EPOCH);
+                //account.set_rent_epoch(RENT_EXEMPT_RENT_EPOCH);
                 CollectedInfo::default()
             }
             RentResult::NoRentCollectionNow => CollectedInfo::default(),

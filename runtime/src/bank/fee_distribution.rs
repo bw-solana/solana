@@ -54,11 +54,11 @@ impl Bank {
     // Ref: distribute_rent_to_validators
     pub(super) fn distribute_transaction_fees(&self) {
         let collector_fees = self.collector_fees.load(Relaxed);
-        let (deposit, mut burn) = self.calculate_reward_and_burn_fees(collector_fees);
-        if deposit > 0 {
+         if collector_fees != 0 {
+            let (deposit, mut burn) = self.calculate_reward_and_burn_fees(collector_fees);
             self.deposit_or_burn_fee(deposit, &mut burn);
+            self.capitalization.fetch_sub(burn, Relaxed);
         }
-        self.capitalization.fetch_sub(burn, Relaxed);
     }
 
     // Replace `distribute_transaction_fees()` after Feature Gate: Reward full priority fee to
