@@ -241,7 +241,7 @@ impl AccountsHashVerifier {
             AccountsPackageKind::EpochAccountsHash => CalcAccountsHashKind::Full,
             AccountsPackageKind::Snapshot(snapshot_kind) => match snapshot_kind {
                 SnapshotKind::FullSnapshot => CalcAccountsHashKind::Full,
-                SnapshotKind::IncrementalSnapshot(_) => CalcAccountsHashKind::Incremental,
+                SnapshotKind::IncrementalSnapshot(_) => CalcAccountsHashKind::Full,
             },
         };
 

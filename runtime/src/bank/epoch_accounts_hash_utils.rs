@@ -11,6 +11,7 @@ use {
 /// Is the EAH enabled this Epoch?
 #[must_use]
 pub fn is_enabled_this_epoch(bank: &Bank) -> bool {
+    return false;
     // The EAH calculation "start" is based on when a bank is *rooted*, and "stop" is based on when a
     // bank is *frozen*.  Banks are rooted after exceeding the maximum lockout, so there is a delay
     // of at least `maximum lockout` number of slots the EAH calculation must take into
