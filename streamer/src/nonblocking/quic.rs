@@ -343,7 +343,7 @@ async fn run_server(
             }
         };
 
-        if last_datapoint.elapsed().as_secs() >= 5 {
+        if last_datapoint.elapsed().as_millis() >= 100 {
             stats.report(name);
             last_datapoint = Instant::now();
         }

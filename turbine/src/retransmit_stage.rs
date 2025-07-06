@@ -7,7 +7,6 @@ use {
         xdp::{XdpConfig, XdpRetransmitter, XdpSender},
     },
     bytes::Bytes,
-    core::num,
     crossbeam_channel::{Receiver, RecvError, TryRecvError},
     lru::LruCache,
     rand::Rng,

@@ -89,9 +89,9 @@ struct SigVerifierStats {
 impl SigVerifierStats {
     fn maybe_report(&self, name: &'static str) {
         // No need to report a datapoint if no batches/packets received
-        if self.total_batches == 0 {
+        /*if self.total_batches == 0 {
             return;
-        }
+        }*/
 
         datapoint_info!(
             name,
@@ -418,7 +418,7 @@ impl SigVerifyStage {
                             _ => error!("{:?}", e),
                         }
                     }
-                    if last_print.elapsed().as_secs() > 2 {
+                    if last_print.elapsed().as_millis() >= 100 {
                         stats.maybe_report(metrics_name);
                         stats = SigVerifierStats::default();
                         last_print = Instant::now();

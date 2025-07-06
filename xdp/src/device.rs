@@ -315,7 +315,7 @@ impl<F: Frame> RxFillRing<F> {
         }
     }
 
-    pub fn write(&mut self, frame: F, options: u32) -> Result<(), io::Error> {
+    pub fn write(&mut self, frame: F, _options: u32) -> Result<(), io::Error> {
         let Some(index) = self.producer.produce() else {
             return Err(ErrorKind::StorageFull.into());
         };
