@@ -2,7 +2,7 @@ use {
     agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
     bincode::serialize_into,
     chrono::{DateTime, Local},
-    crossbeam_channel::{unbounded, Receiver, SendError, Sender, TryRecvError},
+    crossbeam_channel::{bounded, unbounded, Receiver, SendError, Sender, TryRecvError},
     rolling_file::{RollingCondition, RollingConditionBasic, RollingFileAppender},
     solana_clock::Slot,
     solana_hash::Hash,
@@ -290,8 +290,12 @@ impl BankingTracer {
         Self::channel(label, self.active_tracer.as_ref().cloned())
     }
 
+    fn create_channel2(&self, label: ChannelLabel) -> (BankingPacketSender, BankingPacketReceiver) {
+        Self::channel2(label, self.active_tracer.as_ref().cloned())
+    }
+
     pub fn create_channel_non_vote(&self) -> (BankingPacketSender, BankingPacketReceiver) {
-        self.create_channel(ChannelLabel::NonVote)
+        self.create_channel2(ChannelLabel::NonVote)
     }
 
     fn create_channel_tpu_vote(&self) -> (BankingPacketSender, BankingPacketReceiver) {
@@ -356,6 +360,14 @@ impl BankingTracer {
         active_tracer: Option<ActiveTracer>,
     ) -> (TracedSender, Receiver<BankingPacketBatch>) {
         let (sender, receiver) = unbounded();
+        Self::channel_inner(label, active_tracer, sender, receiver)
+    }
+
+    fn channel2(
+        label: ChannelLabel,
+        active_tracer: Option<ActiveTracer>,
+    ) -> (TracedSender, Receiver<BankingPacketBatch>) {
+        let (sender, receiver) = bounded(10_000);
         Self::channel_inner(label, active_tracer, sender, receiver)
     }
 
@@ -459,6 +471,26 @@ impl TracedSender {
             }
         }
         self.sender.send(batch)
+    }
+
+    pub fn try_send(&self, batch: BankingPacketBatch) -> Result<(), crossbeam_channel::TrySendError<BankingPacketBatch>> {
+        if let Some(ActiveTracer { trace_sender, exit }) = &self.active_tracer {
+            if !exit.load(Ordering::Relaxed) {
+                trace_sender
+                    .send(TimedTracedEvent(
+                        SystemTime::now(),
+                        TracedEvent::PacketBatch(self.label, BankingPacketBatch::clone(&batch)),
+                    ))
+                    .map_err(|err| {
+                        error!(
+                            "unexpected error when tracing a banking event...: {:?}",
+                            err
+                        );
+                        SendError(BankingPacketBatch::clone(&batch))
+                    })?;
+            }
+        }
+        self.sender.try_send(batch)
     }
 
     pub fn len(&self) -> usize {

@@ -63,7 +63,7 @@ impl SigVerifier for TransactionSigVerifier {
                 .send(banking_packet_batch.clone())?;
             let _ = forward_stage_sender.try_send((banking_packet_batch, self.reject_non_vote));
         } else {
-            self.banking_stage_sender.send(banking_packet_batch)?;
+            let _ = self.banking_stage_sender.try_send(banking_packet_batch);
         }
 
         Ok(())
