@@ -281,10 +281,17 @@ impl ClusterNodes<RetransmitStage> {
             .enumerate()
             .filter(|(index, _)| index != leader_index)
             .filter_map(|(index, node)| {
-                if !root_found && index == *my_index {
+                if !root_found {
+                    if index == *my_index {
+                        // This is the root node.
+                        i_am_root = true;
+                    }
                     root_found = true;
-                    i_am_root = true;
-                    return None; // Skip self.
+                }
+
+                if index == *my_index {
+                    // Skip self.
+                    return None;
                 }
 
                 // Return all nodes:
