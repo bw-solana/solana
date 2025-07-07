@@ -255,6 +255,57 @@ impl ClusterNodes<RetransmitStage> {
         })
     }
 
+    pub fn get_retransmit_addrs2(
+        &self,
+        slot_leader: &Pubkey,
+        shred: &ShredId,
+        fanout: usize, // unused
+        socket_addr_space: &SocketAddrSpace,
+    ) -> Result<(/*root_distance:*/ u8, Vec<SocketAddr>), Error> {
+        if slot_leader == &self.pubkey {
+            return Err(Error::Loopback {
+                leader: *slot_leader,
+                shred: *shred,
+            });
+        }
+
+        let protocol = get_broadcast_protocol(shred);
+        let leader_index = self.index.get(slot_leader).unwrap();
+        let my_index = self.index.get(&self.pubkey).unwrap();
+        let mut root_found = false;
+        let mut i_am_root = false;
+
+        let peers: Vec<SocketAddr> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index != leader_index)
+            .filter_map(|(index, node)| {
+                if !root_found && index == *my_index {
+                    root_found = true;
+                    i_am_root = true;
+                    return None; // Skip self.
+                }
+
+                // Return all nodes:
+                // - in the first layer if root.
+                // - every `fanout` node if not root.
+                if (i_am_root && index <= fanout)
+                    || (!i_am_root && index > fanout && index % fanout == 0)
+                {
+                    return node
+                        .contact_info()
+                        .and_then(|info| info.tvu(protocol))
+                        .filter(|addr| socket_addr_space.check(addr));
+                }
+
+                None // Skip all other nodes.
+            })
+            .collect();
+
+        Ok((0, peers))
+    }
+
     // Returns the parent node in the turbine broadcast tree.
     // Returns None if the node is the root of the tree or if it is not staked.
     pub(crate) fn get_retransmit_parent(
@@ -366,10 +417,7 @@ fn get_nodes(
             pubkey: Pubkey::new_unique(),
             wallclock: timestamp(),
             tvu_quic: None,
-            tvu_udp: Some(SocketAddr::new(
-                ip,
-                port,
-            )),
+            tvu_udp: Some(SocketAddr::new(ip, port)),
         };
         let node = NodeId::from(contact_info);
         Node { node, stake: 0 }

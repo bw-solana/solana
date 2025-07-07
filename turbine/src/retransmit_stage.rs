@@ -415,7 +415,7 @@ fn retransmit_shred(
     }
     let mut compute_turbine_peers = Measure::start("turbine_start");
     let (root_distance, addrs) =
-        get_retransmit_addrs(&key, root_bank, cache, addr_cache, socket_addr_space, stats)?;
+        get_retransmit_addrs2(&key, root_bank, cache, addr_cache, socket_addr_space, stats)?;
     compute_turbine_peers.stop();
     stats
         .compute_turbine_peers_total
@@ -476,7 +476,7 @@ fn retransmit_shred(
     })
 }
 
-fn get_retransmit_addrs<'a>(
+fn _get_retransmit_addrs<'a>(
     shred: &ShredId,
     root_bank: &Bank,
     cache: &HashMap<Slot, (/*leader:*/ Pubkey, Arc<ClusterNodes<RetransmitStage>>)>,
@@ -492,6 +492,32 @@ fn get_retransmit_addrs<'a>(
     let data_plane_fanout = cluster_nodes::get_data_plane_fanout(shred.slot(), root_bank);
     let (root_distance, addrs) = cluster_nodes
         .get_retransmit_addrs(slot_leader, shred, data_plane_fanout, socket_addr_space)
+        .inspect_err(|err| match err {
+            Error::Loopback { .. } => {
+                stats.num_loopback_errs.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+        .ok()?;
+    stats.addr_cache_miss.fetch_add(1, Ordering::Relaxed);
+    Some((root_distance, Cow::Owned(addrs)))
+}
+
+fn get_retransmit_addrs2<'a>(
+    shred: &ShredId,
+    root_bank: &Bank,
+    cache: &HashMap<Slot, (/*leader:*/ Pubkey, Arc<ClusterNodes<RetransmitStage>>)>,
+    addr_cache: &'a AddrCache,
+    socket_addr_space: &SocketAddrSpace,
+    stats: &RetransmitStats,
+) -> Option<(/*root_distance:*/ u8, Cow<'a, [SocketAddr]>)> {
+    if let Some((root_distance, addrs)) = addr_cache.get(shred) {
+        stats.addr_cache_hit.fetch_add(1, Ordering::Relaxed);
+        return Some((root_distance, Cow::Borrowed(addrs)));
+    }
+    let (slot_leader, cluster_nodes) = cache.get(&shred.slot())?;
+    let data_plane_fanout = cluster_nodes::get_data_plane_fanout(shred.slot(), root_bank);
+    let (root_distance, addrs) = cluster_nodes
+        .get_retransmit_addrs2(slot_leader, shred, data_plane_fanout, socket_addr_space)
         .inspect_err(|err| match err {
             Error::Loopback { .. } => {
                 stats.num_loopback_errs.fetch_add(1, Ordering::Relaxed);
@@ -541,7 +567,7 @@ fn cache_retransmit_addrs(
         let data_plane_fanout = cluster_nodes::get_data_plane_fanout(shred.slot(), &root_bank);
         let (slot_leader, cluster_nodes) = cache.get(&shred.slot())?;
         let (root_distance, addrs) = cluster_nodes
-            .get_retransmit_addrs(slot_leader, &shred, data_plane_fanout, socket_addr_space)
+            .get_retransmit_addrs2(slot_leader, &shred, data_plane_fanout, socket_addr_space)
             .ok()?;
         Some((shred, (root_distance, addrs.into_boxed_slice())))
     };
