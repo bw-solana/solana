@@ -126,7 +126,7 @@ impl RetransmitStats {
         cluster_info: &ClusterInfo,
         cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     ) {
-        const SUBMIT_CADENCE: Duration = Duration::from_secs(1);
+        const SUBMIT_CADENCE: Duration = Duration::from_millis(100);
 
         if self.since.elapsed() < SUBMIT_CADENCE {
             return;
