@@ -358,15 +358,17 @@ fn get_nodes(
     )
     // Add a bunch of fake, unstaked nodes for testing.
     .chain((0..5000).map(|i: u16| {
-        let addr_byte1 = (i / 256).min(255) as u8;
-        let addr_byte2 = (i % 256).min(255) as u8;
+        // cluster 2, tiva IP. Targeting this so that traffic doesn't leave the
+        // metro and nobody else complains of abuse.
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(147, 28, 173, 41));
+        let port = i;
         let contact_info = ContactInfo {
             pubkey: Pubkey::new_unique(),
             wallclock: timestamp(),
             tvu_quic: None,
             tvu_udp: Some(SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::new(50, 234, addr_byte1, addr_byte2)),
-                8080,
+                ip,
+                port,
             )),
         };
         let node = NodeId::from(contact_info);
