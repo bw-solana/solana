@@ -286,7 +286,7 @@ async fn run_server(
     let overall_connection_rate_limiter =
         TotalConnectionRateLimiter::new(TOTAL_CONNECTIONS_PER_SECOND);
 
-    const WAIT_FOR_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
+    const WAIT_FOR_CONNECTION_TIMEOUT: Duration = Duration::from_millis(100);
     debug!("spawn quic server");
     let mut last_datapoint = Instant::now();
     let unstaked_connection_table: Arc<Mutex<ConnectionTable>> =
