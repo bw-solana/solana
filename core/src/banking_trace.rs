@@ -473,7 +473,10 @@ impl TracedSender {
         self.sender.send(batch)
     }
 
-    pub fn try_send(&self, batch: BankingPacketBatch) -> Result<(), crossbeam_channel::TrySendError<BankingPacketBatch>> {
+    pub fn try_send(
+        &self,
+        batch: BankingPacketBatch,
+    ) -> Result<(), crossbeam_channel::TrySendError<BankingPacketBatch>> {
         if let Some(ActiveTracer { trace_sender, exit }) = &self.active_tracer {
             if !exit.load(Ordering::Relaxed) {
                 trace_sender
