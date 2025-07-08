@@ -461,7 +461,7 @@ pub fn broadcast_shreds(
                 let key = shred.id();
                 let protocol = cluster_nodes::get_broadcast_protocol(&key);
                 cluster_nodes
-                    .get_broadcast_peer(&key)?
+                    .get_broadcast_peer2(&key)?
                     .tvu(protocol)
                     .filter(|addr| socket_addr_space.check(addr))
                     .map(|addr| {

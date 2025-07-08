@@ -416,14 +416,14 @@ fn retransmit_shred(
     let mut compute_turbine_peers = Measure::start("turbine_start");
     let (root_distance, addrs) =
         get_retransmit_addrs2(&key, root_bank, cache, addr_cache, socket_addr_space, stats)?;
-    if key.slot() % 100 == 0 {
+    /*if key.slot() % 100 == 0 {
         log::error!(
             "retransmit_shred: slot: {}, index: {}, addrs: {:?}",
             key.slot(),
             key.index(),
             addrs
         );
-    }
+    }*/
     compute_turbine_peers.stop();
     stats
         .compute_turbine_peers_total

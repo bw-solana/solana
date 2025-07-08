@@ -217,6 +217,15 @@ impl ClusterNodes<BroadcastStage> {
         let index = self.weighted_shuffle.first(&mut rng)?;
         self.nodes[index].contact_info()
     }
+
+    pub(crate) fn get_broadcast_peer2(&self, shred: &ShredId) -> Option<&ContactInfo> {
+        let my_index = *self.index.get(&self.pubkey).unwrap();
+        let mut shred_index = (shred.index() % 10) as usize;
+        if shred_index == my_index {
+            shred_index = (shred_index + 1) % 10;
+        }
+        self.nodes[shred_index].contact_info()
+    }
 }
 
 impl ClusterNodes<RetransmitStage> {
@@ -270,39 +279,34 @@ impl ClusterNodes<RetransmitStage> {
         }
 
         let protocol = get_broadcast_protocol(shred);
-        let leader_index = self.index.get(slot_leader).unwrap();
-        let my_index = self.index.get(&self.pubkey).unwrap();
-        let mut root_found = false;
-        let mut i_am_root = false;
+        let leader_index = *self.index.get(slot_leader).unwrap();
+        let my_index = *self.index.get(&self.pubkey).unwrap();
+
+        // Index into one of the 10 staked nodes in the cluster.
+        let shred_index = (shred.index() % 10) as usize;
+        let i_am_root = if shred_index == my_index {
+            true
+        } else if my_index == (leader_index + 1) % 10 && shred_index == leader_index {
+            true
+        } else {
+            false
+        };
 
         let peers: Vec<SocketAddr> = self
             .nodes
             .iter()
             .enumerate()
-            .filter(|(index, _)| index != leader_index)
+            .filter(|(index, _)| *index != leader_index && *index != my_index)
             .filter_map(|(index, node)| {
-                if !root_found {
-                    if index == *my_index {
-                        // This is the root node.
-                        i_am_root = true;
-                    }
-                    root_found = true;
-                }
-
-                if index == *my_index {
-                    // Skip self.
-                    return None;
-                }
-
                 // Return all nodes:
                 // - in the first layer if root.
                 // - every `fanout` node if not root.
-                if (i_am_root && index <= 40)
+                if (i_am_root && index <= fanout)
                     || (!i_am_root && index > fanout && index % fanout == 0)
                 {
-                    if shred.slot() % 100 == 0 {
+                    /*if shred.slot() % 100 == 0 {
                         log::error!("sending to node index {index}");
-                    }
+                    }*/
                     return node
                         .contact_info()
                         .and_then(|info| info.tvu(protocol))
