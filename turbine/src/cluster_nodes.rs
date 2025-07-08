@@ -268,54 +268,63 @@ impl ClusterNodes<RetransmitStage> {
     }
 
     pub fn get_retransmit_addrs2(
-        &self,
-        slot_leader: &Pubkey,
-        shred: &ShredId,
-        fanout: usize, // unused
-        socket_addr_space: &SocketAddrSpace,
-    ) -> Result<(/*root_distance:*/ u8, Vec<SocketAddr>), Error> {
-        if slot_leader == &self.pubkey {
-            return Err(Error::Loopback {
-                leader: *slot_leader,
-                shred: *shred,
-            });
+    &self,
+    slot_leader: &Pubkey,
+    shred: &ShredId,
+    fanout: usize,
+    socket_addr_space: &SocketAddrSpace,
+) -> Result<(u8, Vec<SocketAddr>), Error> {
+    if slot_leader == &self.pubkey {
+        return Err(Error::Loopback {
+            leader: *slot_leader,
+            shred: *shred,
+        });
+    }
+
+    let protocol = get_broadcast_protocol(shred);
+    let leader_index = *self.index.get(slot_leader).unwrap();
+    let my_index = *self.index.get(&self.pubkey).unwrap();
+
+    let shred_index = (shred.index() as usize) % NUM_STAKED_NODES;
+
+    let i_am_root = shred_index == my_index
+        || (shred_index == leader_index && my_index == (leader_index + 1) % NUM_STAKED_NODES);
+
+    let peer_vec_size = if i_am_root {
+        fanout
+    } else {
+        1 + (self.nodes.len().saturating_sub(NUM_STAKED_NODES)) / fanout
+    };
+
+    let mut peers = Vec::with_capacity(peer_vec_size);
+
+    let protocol_checker = |node: &Node| {
+        node.contact_info()
+            .and_then(|info| info.tvu(protocol))
+            .filter(|addr| socket_addr_space.check(addr))
+    };
+
+    for (index, node) in self.nodes.iter().enumerate() {
+        if index == leader_index || index == my_index {
+            continue;
         }
 
-        let protocol = get_broadcast_protocol(shred);
-        let leader_index = *self.index.get(slot_leader).unwrap();
-        let my_index = *self.index.get(&self.pubkey).unwrap();
-
-        // Index into one of the 10 staked nodes in the cluster.
-        let shred_index = (shred.index() as usize) % NUM_STAKED_NODES;
-        let i_am_root = if shred_index == my_index {
-            true
-        } else if my_index == (leader_index + 1) % NUM_STAKED_NODES && shred_index == leader_index {
-            true
+        let is_valid_target = if i_am_root {
+            index <= fanout
         } else {
-            false
+            index > fanout && index % fanout == 0
         };
 
-        let mut peers = Vec::with_capacity(fanout);
-        self.nodes
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != leader_index && *index != my_index)
-            .for_each(|(index, node)| {
-                if (i_am_root && index <= fanout)
-                    || (!i_am_root && index > fanout && index % fanout == 0)
-                {
-                    if let Some(addr) = node
-                        .contact_info()
-                        .and_then(|info| info.tvu(protocol))
-                        .filter(|addr| socket_addr_space.check(addr))
-                    {
-                        peers.push(addr);
-                    }
-                }
-            });
-
-        Ok((0, peers))
+        if is_valid_target {
+            if let Some(addr) = protocol_checker(node) {
+                peers.push(addr);
+            }
+        }
     }
+
+    Ok((0, peers))
+}
+
 
     // Returns the parent node in the turbine broadcast tree.
     // Returns None if the node is the root of the tree or if it is not staked.
