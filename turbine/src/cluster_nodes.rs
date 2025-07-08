@@ -297,9 +297,12 @@ impl ClusterNodes<RetransmitStage> {
                 // Return all nodes:
                 // - in the first layer if root.
                 // - every `fanout` node if not root.
-                if (i_am_root && index <= fanout)
+                if (i_am_root && index <= 40)
                     || (!i_am_root && index > fanout && index % fanout == 0)
                 {
+                    if shred.slot() % 100 == 0 {
+                        log::error!("sending to node index {index}");
+                    }
                     return node
                         .contact_info()
                         .and_then(|info| info.tvu(protocol))
