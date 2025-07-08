@@ -203,6 +203,9 @@ impl<T> ClusterNodes<T> {
     }
 }
 
+// tiv8 and tiva temporarily removed
+const NUM_STAKED_NODES: usize = 8;
+
 impl ClusterNodes<BroadcastStage> {
     pub fn new(
         cluster_info: &ClusterInfo,
@@ -220,9 +223,9 @@ impl ClusterNodes<BroadcastStage> {
 
     pub(crate) fn get_broadcast_peer2(&self, shred: &ShredId) -> Option<&ContactInfo> {
         let my_index = *self.index.get(&self.pubkey).unwrap();
-        let mut shred_index = (shred.index() % 10) as usize;
+        let mut shred_index = (shred.index() as usize) % NUM_STAKED_NODES;
         if shred_index == my_index {
-            shred_index = (shred_index + 1) % 10;
+            shred_index = (shred_index + 1) % NUM_STAKED_NODES;
         }
         self.nodes[shred_index].contact_info()
     }
@@ -283,10 +286,10 @@ impl ClusterNodes<RetransmitStage> {
         let my_index = *self.index.get(&self.pubkey).unwrap();
 
         // Index into one of the 10 staked nodes in the cluster.
-        let shred_index = (shred.index() % 10) as usize;
+        let shred_index = (shred.index() as usize) % NUM_STAKED_NODES;
         let i_am_root = if shred_index == my_index {
             true
-        } else if my_index == (leader_index + 1) % 10 && shred_index == leader_index {
+        } else if my_index == (leader_index + 1) % NUM_STAKED_NODES && shred_index == leader_index {
             true
         } else {
             false
