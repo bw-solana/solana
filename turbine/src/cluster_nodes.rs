@@ -295,30 +295,24 @@ impl ClusterNodes<RetransmitStage> {
             false
         };
 
-        let peers: Vec<SocketAddr> = self
-            .nodes
+        let mut peers = Vec::with_capacity(fanout);
+        self.nodes
             .iter()
             .enumerate()
             .filter(|(index, _)| *index != leader_index && *index != my_index)
-            .filter_map(|(index, node)| {
-                // Return all nodes:
-                // - in the first layer if root.
-                // - every `fanout` node if not root.
+            .for_each(|(index, node)| {
                 if (i_am_root && index <= fanout)
                     || (!i_am_root && index > fanout && index % fanout == 0)
                 {
-                    /*if shred.slot() % 100 == 0 {
-                        log::error!("sending to node index {index}");
-                    }*/
-                    return node
+                    if let Some(addr) = node
                         .contact_info()
                         .and_then(|info| info.tvu(protocol))
-                        .filter(|addr| socket_addr_space.check(addr));
+                        .filter(|addr| socket_addr_space.check(addr))
+                    {
+                        peers.push(addr);
+                    }
                 }
-
-                None // Skip all other nodes.
-            })
-            .collect();
+            });
 
         Ok((0, peers))
     }
