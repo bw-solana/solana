@@ -387,7 +387,7 @@ impl BankingStage {
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
-            Self::num_threads(),
+            8,
             transaction_status_sender,
             replay_vote_sender,
             log_messages_bytes_limit,
