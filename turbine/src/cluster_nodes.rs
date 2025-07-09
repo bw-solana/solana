@@ -428,7 +428,7 @@ fn get_nodes(
             }),
     )
     // Add a bunch of fake, unstaked nodes for testing.
-    .chain((0..5000).map(|i: u16| {
+    .chain((0..3300).map(|i: u16| {
         // cluster 2, tiva IP. Targeting this so that traffic doesn't leave the
         // metro and nobody else complains of abuse.
         let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(147, 28, 173, 41));
