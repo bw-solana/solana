@@ -284,11 +284,12 @@ impl Tpu {
                 non_vote_sender,
                 enable_block_production_forwarding.then(|| forward_stage_sender.clone()),
             );
-            SigVerifier::Local(SigVerifyStage::new(
+            SigVerifier::Local(SigVerifyStage::new2(
                 packet_receiver,
                 verifier,
                 "solSigVerTpu",
                 "tpu-verifier",
+                bank_forks.clone(),
             ))
         };
 
