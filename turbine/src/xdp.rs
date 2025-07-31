@@ -210,3 +210,40 @@ impl XdpRetransmitter {
         Ok(())
     }
 }
+
+mod test {
+    use super::*;
+    use solana_net_utils::sockets::{bind_with_any_port_with_config, SocketConfiguration};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn test_xdp_config_default() {
+        let config = XdpConfig::new(None::<String>, vec![0], false);
+        let (_xdp_retransmitter, xdp_sender) =
+            XdpRetransmitter::new(config, 12345).expect("Failed to create XDP retransmitter");
+
+        let payload = vec![1, 2, 3, 4];
+        let payload_xdp = XdpShredPayload::Owned(shred::Payload::Unique(payload.clone()));
+        let config = SocketConfiguration::default();
+        config.recv_buffer_size(1024 * 1024); // 1MB
+        config.set_non_blocking(false);
+
+        let ip_addr = IpAddr::V4(Ipv4Addr::new(72, 46, 85, 27));
+        let recv_socket = bind_with_any_port_with_config(ip_addr, config).unwrap();
+        let recv_addr = recv_socket.local_addr().unwrap();
+        xdp_sender.try_send(0, vec![recv_addr], payload_xdp).expect("Failed to send XDP packet");
+
+        recv_socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("Failed to set read timeout");
+        let mut buf = [0u8; 1500];
+        std::thread::sleep(Duration::from_secs(2));
+        match recv_socket.recv_from(&mut buf) {
+            Ok((len, _src)) => {
+                assert_eq!(&buf[..len], payload.as_slice(), "Payload mismatch");
+                println!("Received expected payload: {:?}", &buf[..len]);
+            }
+            Err(e) => panic!("Failed to receive packet: {:?}", e),
+        }
+    }
+}
