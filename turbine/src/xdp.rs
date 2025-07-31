@@ -224,9 +224,8 @@ mod test {
 
         let payload = vec![1, 2, 3, 4];
         let payload_xdp = XdpShredPayload::Owned(shred::Payload::Unique(payload.clone()));
-        let config = SocketConfiguration::default();
-        config.recv_buffer_size(1024 * 1024); // 1MB
-        config.set_non_blocking(false);
+        let mut config = SocketConfiguration::default();
+        config = config.recv_buffer_size(1024 * 1024); // 1MB
 
         let ip_addr = IpAddr::V4(Ipv4Addr::new(72, 46, 85, 27));
         let recv_socket = bind_with_any_port_with_config(ip_addr, config).unwrap();
