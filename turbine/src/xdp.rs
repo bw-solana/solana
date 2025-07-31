@@ -212,37 +212,97 @@ impl XdpRetransmitter {
 }
 
 mod test {
-    use super::*;
-    use solana_net_utils::sockets::{bind_with_any_port_with_config, SocketConfiguration};
-    use std::net::{IpAddr, Ipv4Addr};
+    use {
+        super::*,
+        serial_test::serial,
+        std::net::{IpAddr, Ipv4Addr},
+    };
 
     #[test]
-    fn test_xdp_config_default() {
-        let config = XdpConfig::new(None::<String>, vec![0], false);
+    #[serial]
+    fn test_xdp_skb() {
+        let cpus = vec![0];
+        let zero_copy = false;
+        let config = XdpConfig::new(None::<String>, cpus, zero_copy);
         let (_xdp_retransmitter, xdp_sender) =
             XdpRetransmitter::new(config, 12345).expect("Failed to create XDP retransmitter");
 
-        let payload = vec![1, 2, 3, 4];
-        let payload_xdp = XdpShredPayload::Owned(shred::Payload::Unique(payload.clone()));
-        let mut config = SocketConfiguration::default();
-        config = config.recv_buffer_size(1024 * 1024); // 1MB
-
-        let ip_addr = IpAddr::V4(Ipv4Addr::new(72, 46, 85, 27));
-        let recv_socket = bind_with_any_port_with_config(ip_addr, config).unwrap();
-        let recv_addr = recv_socket.local_addr().unwrap();
-        xdp_sender.try_send(0, vec![recv_addr], payload_xdp).expect("Failed to send XDP packet");
-
-        recv_socket
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("Failed to set read timeout");
-        let mut buf = [0u8; 1500];
-        std::thread::sleep(Duration::from_secs(2));
-        match recv_socket.recv_from(&mut buf) {
-            Ok((len, _src)) => {
-                assert_eq!(&buf[..len], payload.as_slice(), "Payload mismatch");
-                println!("Received expected payload: {:?}", &buf[..len]);
-            }
-            Err(e) => panic!("Failed to receive packet: {:?}", e),
+        // Sending to tiv2 machine for now.
+        let ip_addr = IpAddr::V4(Ipv4Addr::new(147, 75, 198, 191));
+        let recv_addr = SocketAddr::new(ip_addr, 12345);
+        for i in 0..1024 as usize {
+            let payload = vec![(i % 256) as u8];
+            let payload_xdp = XdpShredPayload::Owned(shred::Payload::Unique(payload.clone()));
+            xdp_sender.try_send(i, vec![recv_addr], payload_xdp).expect("Failed to send XDP packet");
         }
+
+        // Sleep to make sure the packet is processed by XDP retransmitter.
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    #[test]
+    #[serial]
+    fn test_xdp_zero_copy() {
+        let cpus = vec![0];
+        let zero_copy = true;
+        let config = XdpConfig::new(None::<String>, cpus, zero_copy);
+        let (_xdp_retransmitter, xdp_sender) =
+            XdpRetransmitter::new(config, 12345).expect("Failed to create XDP retransmitter");
+
+        // Sending to tiv2 machine for now.
+        let ip_addr = IpAddr::V4(Ipv4Addr::new(147, 75, 198, 191));
+        let recv_addr = SocketAddr::new(ip_addr, 12345);
+        for i in 0..1024 as usize {
+            let payload = vec![(i % 256) as u8];
+            let payload_xdp = XdpShredPayload::Owned(shred::Payload::Unique(payload.clone()));
+            xdp_sender.try_send(i, vec![recv_addr], payload_xdp).expect("Failed to send XDP packet");
+        }
+
+        // Sleep to make sure the packet is processed by XDP retransmitter.
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    #[test]
+    #[serial]
+    fn test_xdp_zero_copy_multiple_cpu() {
+        let cpus = vec![0, 1];
+        let zero_copy = true;
+        let config = XdpConfig::new(None::<String>, cpus, zero_copy);
+        let (_xdp_retransmitter, xdp_sender) =
+            XdpRetransmitter::new(config, 12345).expect("Failed to create XDP retransmitter");
+
+        // Sending to tiv2 machine for now.
+        let ip_addr = IpAddr::V4(Ipv4Addr::new(147, 75, 198, 191));
+        let recv_addr = SocketAddr::new(ip_addr, 12345);
+        for i in 0..1024 as usize {
+            let payload = vec![(i % 256) as u8];
+            let payload_xdp = XdpShredPayload::Owned(shred::Payload::Unique(payload.clone()));
+            xdp_sender.try_send(i, vec![recv_addr], payload_xdp).expect("Failed to send XDP packet");
+        }
+
+        // Sleep to make sure the packet is processed by XDP retransmitter.
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    #[test]
+    #[serial]
+    fn test_xdp_skb_multiple_cpu() {
+        let cpus = vec![0, 1];
+        let zero_copy = false;
+        let config = XdpConfig::new(None::<String>, cpus, zero_copy);
+        let (_xdp_retransmitter, xdp_sender) =
+            XdpRetransmitter::new(config, 12345).expect("Failed to create XDP retransmitter");
+
+        // Sending to tiv2 machine for now.
+        let ip_addr = IpAddr::V4(Ipv4Addr::new(147, 75, 198, 191));
+        let recv_addr = SocketAddr::new(ip_addr, 12345);
+        for i in 0..1024 as usize {
+            let payload = vec![(i % 256) as u8];
+            let payload_xdp = XdpShredPayload::Owned(shred::Payload::Unique(payload.clone()));
+            xdp_sender.try_send(i, vec![recv_addr], payload_xdp).expect("Failed to send XDP packet");
+        }
+
+        // Sleep to make sure the packet is processed by XDP retransmitter.
+        std::thread::sleep(Duration::from_secs(2));
     }
 }

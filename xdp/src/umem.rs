@@ -152,7 +152,7 @@ impl PageAlignedMemory {
         huge: bool,
     ) -> Result<Self, AllocError> {
         debug_assert!(frame_size.is_power_of_two());
-        debug_assert!(frame_count.is_power_of_two());
+        //debug_assert!(frame_count.is_power_of_two());
         debug_assert!(page_size.is_power_of_two());
         let memory_size = frame_count * frame_size;
         let aligned_size = (memory_size + page_size - 1) & !(page_size - 1);

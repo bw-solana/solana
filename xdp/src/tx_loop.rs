@@ -72,8 +72,9 @@ pub fn tx_loop<T: AsRef<[u8]>>(
         caps::raise(None, CapSet::Effective, cap).unwrap();
     }
 
-    let Ok((mut socket, tx)) = Socket::tx(queue, umem, zero_copy, tx_size * 2, tx_size) else {
-        panic!("failed to create AF_XDP socket on queue {queue_id:?}");
+    let (mut socket, tx) = match Socket::tx(queue, umem, zero_copy, tx_size * 2, tx_size) {
+        Ok(result) => result,
+        Err(e) => panic!("failed to create AF_XDP socket on queue {queue_id:?}: {e}"),
     };
 
     let umem = socket.umem();
