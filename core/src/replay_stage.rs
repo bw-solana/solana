@@ -916,7 +916,7 @@ impl ReplayStage {
 
                 let forks_root = bank_forks.read().unwrap().root();
 
-                if migration_status.is_alpenglow_enabled() {
+                if !migration_status.is_alpenglow_enabled() {
                     // Process cluster-agreed versions of duplicate slots for which we potentially
                     // have the wrong version. Our version was dead or pruned.
                     // Signalled by ancestor_hashes_service.
