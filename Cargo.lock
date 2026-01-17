@@ -603,6 +603,7 @@ dependencies = [
  "solana-frozen-abi-macro",
  "solana-hash 3.1.0",
  "solana-pubkey 4.0.0",
+ "spl-pod",
  "tempfile",
 ]
 

@@ -1034,6 +1034,7 @@ impl ReplayStage {
                         &mut tbft_structs.heaviest_subtree_fork_choice,
                         &mut latest_validator_votes_for_frozen_banks,
                         &mut vote_slots,
+                        &migration_status,
                     );
                     compute_bank_stats_time.stop();
 
@@ -3951,10 +3952,10 @@ impl ReplayStage {
         heaviest_subtree_fork_choice: &mut HeaviestSubtreeForkChoice,
         latest_validator_votes_for_frozen_banks: &mut LatestValidatorVotesForFrozenBanks,
         vote_slots: &mut HashSet<Slot, ahash::RandomState>,
+        migration_status: &MigrationStatus,
     ) -> Vec<Slot> {
         frozen_banks.sort_by_key(|bank| bank.slot());
         let mut new_stats = vec![];
-        let root_slot = bank_forks.read().unwrap().root();
         for bank in frozen_banks.iter() {
             let bank_slot = bank.slot();
             // Only time progress map should be missing a bank slot
@@ -3965,6 +3966,7 @@ impl ReplayStage {
                     .get_fork_stats_mut(bank_slot)
                     .expect("All frozen banks must exist in the Progress map")
                     .computed;
+
                 if !is_computed {
                     // Check if our tower is behind, if so adopt the on chain tower from this Bank
                     Self::adopt_on_chain_tower_if_behind(
@@ -3976,11 +3978,10 @@ impl ReplayStage {
                         bank,
                         bank_forks,
                     );
-
                     let computed_bank_state = Tower::collect_vote_lockouts(
                         my_vote_pubkey,
                         bank_slot,
-                        root_slot,
+                        bank.parent_slot(),
                         &bank.vote_accounts(),
                         ancestors,
                         |slot| progress.get_hash(slot),
@@ -4000,8 +4001,43 @@ impl ReplayStage {
                         fork_stake,
                         lockout_intervals,
                         my_latest_landed_vote,
+                        parent_is_super_oc,
                         ..
                     } = computed_bank_state;
+
+                    if parent_is_super_oc
+                        && migration_status.qualifies_for_genesis_discovery(bank_slot)
+                    {
+                        let migration_slot =
+                            migration_status.migration_slot().expect("In migration");
+                        // We have a block whose ancestor qualifies to be the genesis block.
+                        let genesis_slot = ancestors
+                            .get(&bank_slot)
+                            .expect(
+                                "Ancestors must exist, as this cannot be slot 0, and no roots are \
+                                 made during migration",
+                            )
+                            .iter()
+                            .filter(|slot| **slot < migration_slot)
+                            .max()
+                            .copied()
+                            .expect("Genesis slot must exist, no rooting past migration slot");
+                        let genesis_bank = bank_forks
+                            .read()
+                            .unwrap()
+                            .get(genesis_slot)
+                            .expect("Genesis bank must exist, no rooting past migration slot");
+
+                        let genesis_block = (
+                            genesis_slot,
+                            genesis_bank.block_id().expect(
+                                "It is impossible for block id to not be known at this point, as \
+                                 a descendant of this block has reached super oc status",
+                            ),
+                        );
+                        migration_status.set_genesis_block(genesis_block);
+                    }
+
                     let stats = progress
                         .get_fork_stats_mut(bank_slot)
                         .expect("All frozen banks must exist in the Progress map");
@@ -5856,6 +5892,7 @@ pub(crate) mod tests {
             &mut heaviest_subtree_fork_choice,
             &mut latest_validator_votes_for_frozen_banks,
             &mut vote_slots,
+            &MigrationStatus::default(),
         );
 
         // bank 0 has no votes, should not send any votes on the channel
@@ -5908,6 +5945,7 @@ pub(crate) mod tests {
             &mut heaviest_subtree_fork_choice,
             &mut latest_validator_votes_for_frozen_banks,
             &mut vote_slots,
+            &MigrationStatus::default(),
         );
 
         // Bank 1 had one vote
@@ -5944,6 +5982,7 @@ pub(crate) mod tests {
             &mut heaviest_subtree_fork_choice,
             &mut latest_validator_votes_for_frozen_banks,
             &mut vote_slots,
+            &MigrationStatus::default(),
         );
         // No new stats should have been computed
         assert!(newly_computed.is_empty());
@@ -5985,6 +6024,7 @@ pub(crate) mod tests {
             heaviest_subtree_fork_choice,
             &mut latest_validator_votes_for_frozen_banks,
             &mut vote_slots,
+            &MigrationStatus::default(),
         );
 
         let bank1 = vote_simulator.bank_forks.read().unwrap().get(1).unwrap();
@@ -6055,6 +6095,7 @@ pub(crate) mod tests {
             &mut vote_simulator.tbft_structs.heaviest_subtree_fork_choice,
             &mut vote_simulator.latest_validator_votes_for_frozen_banks,
             &mut vote_slots,
+            &MigrationStatus::default(),
         );
 
         frozen_banks.sort_by_key(|bank| bank.slot());
@@ -7180,6 +7221,7 @@ pub(crate) mod tests {
             &mut HeaviestSubtreeForkChoice::new_from_bank_forks(bank_forks.clone()),
             &mut LatestValidatorVotesForFrozenBanks::default(),
             &mut vote_slots,
+            &MigrationStatus::default(),
         );
 
         // Check status is true
@@ -7809,6 +7851,7 @@ pub(crate) mod tests {
             &mut tbft_structs.heaviest_subtree_fork_choice,
             &mut latest_validator_votes_for_frozen_banks,
             &mut vote_slots,
+            &MigrationStatus::default(),
         );
 
         // Try to switch to vote to the heaviest slot 6, then return the vote results
@@ -7935,6 +7978,7 @@ pub(crate) mod tests {
             &mut tbft_structs.heaviest_subtree_fork_choice,
             &mut latest_validator_votes_for_frozen_banks,
             &mut vote_slots,
+            &MigrationStatus::default(),
         );
         // Try to switch to vote to the heaviest slot 5, then return the vote results
         let (heaviest_bank, heaviest_bank_on_same_fork) = tbft_structs
@@ -8700,6 +8744,7 @@ pub(crate) mod tests {
             &mut tbft_structs.heaviest_subtree_fork_choice,
             &mut latest_validator_votes_for_frozen_banks,
             &mut vote_slots,
+            &MigrationStatus::default(),
         );
         assert_eq!(tower.last_voted_slot(), Some(last_voted_slot));
         assert_eq!(progress.my_latest_landed_vote(tip_of_voted_fork), Some(0));
@@ -9221,6 +9266,7 @@ pub(crate) mod tests {
             heaviest_subtree_fork_choice,
             latest_validator_votes_for_frozen_banks,
             vote_slots,
+            &MigrationStatus::default(),
         );
         let (heaviest_bank, heaviest_bank_on_same_fork) = heaviest_subtree_fork_choice
             .select_forks(&frozen_banks, tower, progress, ancestors, bank_forks);

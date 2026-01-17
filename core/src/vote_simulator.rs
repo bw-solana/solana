@@ -17,6 +17,7 @@ use {
         replay_stage::{HeaviestForkFailures, ReplayStage, TowerBFTStructures},
         unfrozen_gossip_verified_vote_hashes::UnfrozenGossipVerifiedVoteHashes,
     },
+    agave_votor_messages::migration::MigrationStatus,
     crossbeam_channel::unbounded,
     solana_clock::Slot,
     solana_epoch_schedule::EpochSchedule,
@@ -198,6 +199,7 @@ impl VoteSimulator {
             &mut self.tbft_structs.heaviest_subtree_fork_choice,
             &mut self.latest_validator_votes_for_frozen_banks,
             &mut vote_slots,
+            &MigrationStatus::default(),
         );
 
         let vote_bank = self

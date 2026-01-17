@@ -20,6 +20,7 @@ use {
         tower_vote_state::TowerVoteState,
     },
     crate::{consensus::progress_map::LockoutInterval, replay_stage::DUPLICATE_THRESHOLD},
+    agave_votor_messages::migration::GENESIS_VOTE_THRESHOLD,
     chrono::prelude::*,
     solana_clock::{Slot, UnixTimestamp},
     solana_hash::Hash,
@@ -165,8 +166,9 @@ pub(crate) struct ComputedBankState {
     pub voted_stakes: VotedStakes,
     pub total_stake: Stake,
     pub fork_stake: Stake,
-    /// Flat list of intervals of lockouts of the form {voter, start, end}
-    /// ([`crate::consensus::progress_map::LockoutInterval`]).
+    pub parent_is_super_oc: bool,
+    // Tree of intervals of lockouts of the form [slot, slot + slot.lockout],
+    // keyed by end of the range
     pub lockout_intervals: LockoutIntervals,
     pub my_latest_landed_vote: Option<Slot>,
 }
@@ -412,6 +414,7 @@ impl Tower {
         let mut voted_stakes =
             HashMap::with_capacity_and_hasher(total_slots, ahash::RandomState::default());
         let mut total_stake = 0;
+        let mut super_oc_stake = 0;
 
         let total_votes = vote_accounts
             .values()
@@ -468,6 +471,12 @@ impl Tower {
                     get_frozen_hash(last_landed_voted_slot),
                     true,
                 );
+
+                // For migration - a block is super OC there are 82% of votes in the direct child
+                // on the very next slot
+                if last_landed_voted_slot == root_slot {
+                    super_oc_stake += voted_stake;
+                }
             }
 
             vote_state.process_next_vote_slot(bank_slot);
@@ -527,6 +536,9 @@ impl Tower {
             total_stake += voted_stake;
         }
 
+        let parent_is_super_oc = bank_slot == root_slot + 1
+            && super_oc_stake as f64 / total_stake as f64 > GENESIS_VOTE_THRESHOLD;
+
         // TODO: populate_ancestor_voted_stakes only adds zeros. Comment why
         // that is necessary (if so).
         Self::populate_ancestor_voted_stakes(
@@ -556,6 +568,7 @@ impl Tower {
             voted_stakes,
             total_stake,
             fork_stake,
+            parent_is_super_oc,
             lockout_intervals,
             my_latest_landed_vote,
         }
