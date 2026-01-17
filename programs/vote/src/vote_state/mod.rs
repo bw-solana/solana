@@ -1,16 +1,13 @@
 //! Vote state, vote program
 //! Receive and processes votes from validators
 
-#[cfg(feature = "dev-context-only-utils")]
 pub mod handler;
-#[cfg(not(feature = "dev-context-only-utils"))]
-pub(crate) mod handler;
 
 pub use solana_vote_interface::state::{vote_state_versions::*, *};
 use {
     handler::{VoteStateHandle, VoteStateHandler, VoteStateTargetVersion},
     log::*,
-    solana_account::{AccountSharedData, WritableAccount},
+    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_bls_signatures::{keypair::Keypair as BLSKeypair, VerifiableProofOfPossession},
     solana_clock::{Clock, Epoch, Slot},
     solana_epoch_schedule::EpochSchedule,
@@ -27,8 +24,22 @@ use {
     std::{
         cmp::Ordering,
         collections::{HashSet, VecDeque},
+        sync::{LazyLock, Mutex},
     },
 };
+
+pub static TEMP_HARDCODED_TARGET_VERSION: LazyLock<Mutex<VoteStateTargetVersion>> =
+    LazyLock::new(|| Mutex::new(VoteStateTargetVersion::V3));
+
+// utility function, used by Stakes, tests
+pub fn from<T: ReadableAccount>(account: &T) -> Option<VoteStateV3> {
+    VoteStateV3::deserialize(account.data()).ok()
+}
+
+// utility function, used by Stakes, tests
+pub fn to<T: WritableAccount>(versioned: &VoteStateVersions, account: &mut T) -> Option<()> {
+    VoteStateV3::serialize(versioned, account.data_as_mut_slice()).ok()
+}
 
 // Switch that preserves old behavior before vote state v4 feature gate.
 // This should be cleaned up when vote state v4 is activated.

@@ -14,6 +14,7 @@ use {
     solana_gossip::cluster_info::ClusterInfo,
     solana_measure::measure::Measure,
     solana_pubkey::Pubkey,
+    solana_rpc::alpenglow_last_voted::AlpenglowLastVoted,
     solana_runtime::bank_forks::BankForks,
     solana_transaction_error::TransportError,
     std::{
@@ -123,6 +124,8 @@ impl VotingService {
         connection_cache: Arc<ConnectionCache>,
         bank_forks: Arc<RwLock<BankForks>>,
         test_override: Option<VotingServiceOverride>,
+        alpenglow_last_voted: Arc<AlpenglowLastVoted>,
+        my_vote_pubkey: Pubkey,
     ) -> Self {
         let (additional_listeners, alpenglow_port_override) = match test_override {
             None => (Vec::new(), None),
@@ -133,7 +136,7 @@ impl VotingService {
         };
 
         let thread_hdl = Builder::new()
-            .name("solVotorVoteSvc".to_string())
+            .name("solVoteService".to_string())
             .spawn(move || {
                 let mut staked_validators_cache = StakedValidatorsCache::new(
                     bank_forks.clone(),
@@ -143,11 +146,22 @@ impl VotingService {
                     alpenglow_port_override,
                 );
 
-                info!("AlpenglowVotingService has started");
+                let mut my_last_voted = 0;
                 loop {
                     let Ok(bls_op) = bls_receiver.recv() else {
                         break;
                     };
+                    if let BLSOp::PushVote { slot, message, .. } = &bls_op {
+                        if let ConsensusMessage::Vote(vote_message) = message.as_ref() {
+                            if vote_message.vote.is_notarization_or_finalization()
+                                && slot > &my_last_voted
+                            {
+                                my_last_voted = *slot;
+                                alpenglow_last_voted
+                                    .update_last_voted(&HashMap::from([(my_vote_pubkey, *slot)]));
+                            }
+                        }
+                    }
                     Self::handle_bls_op(
                         &cluster_info,
                         vote_history_storage.as_ref(),
@@ -157,7 +171,6 @@ impl VotingService {
                         &mut staked_validators_cache,
                     );
                 }
-                info!("AlpenglowVotingService has stopped");
             })
             .unwrap();
         Self { thread_hdl }
@@ -319,6 +332,8 @@ mod tests {
                     additional_listeners: vec![listener],
                     alpenglow_port_override: AlpenglowPortOverride::default(),
                 }),
+                Arc::new(AlpenglowLastVoted::default()),
+                validator_keypairs[0].vote_keypair.pubkey(),
             ),
             validator_keypairs,
         )

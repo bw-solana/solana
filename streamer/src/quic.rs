@@ -599,10 +599,7 @@ impl Default for QuicStreamerConfig {
 }
 
 impl QuicStreamerConfig {
-    #[cfg(feature = "dev-context-only-utils")]
     pub const DEFAULT_NUM_SERVER_THREADS_FOR_TEST: NonZeroUsize = NonZeroUsize::new(8).unwrap();
-
-    #[cfg(feature = "dev-context-only-utils")]
     pub fn default_for_tests() -> Self {
         Self {
             num_threads: Self::DEFAULT_NUM_SERVER_THREADS_FOR_TEST,

@@ -31,9 +31,9 @@ use {
 pub enum GenerateVoteTxResult {
     // The following are transient errors
     // non voting validator, not eligible for refresh
-    // until authorized keypair is overridden
+    // until authorized keypair is overriden
     NonVoting,
-    // hot spare validator, not eligible for refresh
+    // hot spare validator, not eligble for refresh
     // until set identity is invoked
     HotSpare,
     // The hash verification at startup has not completed
@@ -147,7 +147,7 @@ fn get_or_insert_bls_keypair(
     Ok(bls_keypair)
 }
 
-fn generate_vote_tx(
+pub fn generate_vote_tx(
     vote: &Vote,
     bank: &Bank,
     vote_account_pubkey: Pubkey,

@@ -3,10 +3,15 @@
 
 use {
     crate::{
+        admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
         banking_trace::BankingTracer,
+        block_creation_loop::ReplayHighestFrozen,
+        bls_sigverify::{
+            bls_sigverifier::BLSSigVerifier, bls_sigverify_service::BLSSigverifyService,
+        },
         cluster_info_vote_listener::{
             DuplicateConfirmedSlotsReceiver, GossipVerifiedVoteHashReceiver,
-            VerifiedVoterSlotsReceiver, VoteTracker,
+            VerifiedVoterSlotsReceiver, VerifiedVoterSlotsSender, VoteTracker,
         },
         cluster_slots_service::{cluster_slots::ClusterSlots, ClusterSlotsService},
         completed_data_sets_service::CompletedDataSetsSender,
@@ -20,8 +25,15 @@ use {
         warm_quic_cache_service::WarmQuicCacheService,
         window_service::{WindowService, WindowServiceChannels},
     },
+    agave_votor::{
+        event::{LeaderWindowInfo, VotorEventReceiver, VotorEventSender},
+        vote_history::VoteHistory,
+        vote_history_storage::VoteHistoryStorage,
+        voting_service::{VotingService as AlpenglowVotingService, VotingServiceOverride},
+    },
+    agave_votor_messages::migration::MigrationStatus,
     bytes::Bytes,
-    crossbeam_channel::{unbounded, Receiver, Sender},
+    crossbeam_channel::{bounded, unbounded, Receiver, Sender},
     solana_client::connection_cache::ConnectionCache,
     solana_clock::Slot,
     solana_geyser_plugin_manager::block_metadata_notifier_interface::BlockMetadataNotifierArc,
@@ -29,6 +41,7 @@ use {
         cluster_info::ClusterInfo, duplicate_shred_handler::DuplicateShredHandler,
         duplicate_shred_listener::DuplicateShredListener,
     },
+    solana_hash::Hash,
     solana_keypair::Keypair,
     solana_ledger::{
         blockstore::Blockstore, blockstore_cleanup_service::BlockstoreCleanupService,
@@ -38,7 +51,8 @@ use {
     solana_poh::{poh_controller::PohController, poh_recorder::PohRecorder},
     solana_pubkey::Pubkey,
     solana_rpc::{
-        max_slots::MaxSlots, optimistically_confirmed_bank_tracker::BankNotificationSenderConfig,
+        alpenglow_last_voted::AlpenglowLastVoted, max_slots::MaxSlots,
+        optimistically_confirmed_bank_tracker::BankNotificationSenderConfig,
         rpc_subscriptions::RpcSubscriptions, slot_status_notifier::SlotStatusNotifier,
     },
     solana_runtime::{
@@ -46,7 +60,11 @@ use {
         prioritization_fee_cache::PrioritizationFeeCache, snapshot_controller::SnapshotController,
         vote_sender_types::ReplayVoteSender,
     },
-    solana_streamer::evicting_sender::EvictingSender,
+    solana_streamer::{
+        evicting_sender::EvictingSender,
+        quic::{spawn_simple_qos_server, SimpleQosQuicStreamerConfig, SpawnServerResult},
+        streamer::StakedNodes,
+    },
     solana_turbine::{retransmit_stage::RetransmitStage, xdp::XdpSender},
     std::{
         collections::HashSet,
@@ -56,6 +74,7 @@ use {
         thread::{self, JoinHandle},
     },
     tokio::sync::mpsc::Sender as AsyncSender,
+    tokio_util::sync::CancellationToken,
 };
 
 /// Sets the upper bound on the number of batches stored in the retransmit
@@ -76,10 +95,16 @@ pub struct Tvu {
     blockstore_cleanup_service: Option<BlockstoreCleanupService>,
     cost_update_service: CostUpdateService,
     voting_service: VotingService,
+    alpenglow_voting_service: AlpenglowVotingService,
     warm_quic_cache_service: Option<WarmQuicCacheService>,
     drop_bank_service: DropBankService,
     duplicate_shred_listener: DuplicateShredListener,
+    alpenglow_sigverify_service: BLSSigverifyService,
+    alpenglow_quic_t: thread::JoinHandle<()>,
 }
+
+// The maximum number of alpenglow packets that can be processed in a single batch
+pub const MAX_ALPENGLOW_PACKET_NUM: usize = 10000;
 
 pub struct TvuSockets {
     pub fetch: Vec<UdpSocket>,
@@ -130,6 +155,7 @@ impl Tvu {
     pub fn new(
         vote_account: &Pubkey,
         authorized_voter_keypairs: Arc<RwLock<Vec<Arc<Keypair>>>>,
+        identity_keypair: Arc<Keypair>,
         bank_forks: &Arc<RwLock<BankForks>>,
         cluster_info: &Arc<ClusterInfo>,
         sockets: TvuSockets,
@@ -140,6 +166,8 @@ impl Tvu {
         poh_controller: PohController,
         tower: Tower,
         tower_storage: Arc<dyn TowerStorage>,
+        vote_history: VoteHistory,
+        vote_history_storage: Arc<dyn VoteHistoryStorage>,
         leader_schedule_cache: &Arc<LeaderScheduleCache>,
         exit: Arc<AtomicBool>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
@@ -149,6 +177,7 @@ impl Tvu {
         vote_tracker: Arc<VoteTracker>,
         retransmit_slots_sender: Sender<Slot>,
         gossip_verified_vote_hash_receiver: GossipVerifiedVoteHashReceiver,
+        verified_voter_slots_sender: VerifiedVoterSlotsSender,
         verified_voter_slots_receiver: VerifiedVoterSlotsReceiver,
         replay_vote_sender: ReplayVoteSender,
         completed_data_sets_sender: Option<CompletedDataSetsSender>,
@@ -160,7 +189,7 @@ impl Tvu {
         wait_to_vote_slot: Option<Slot>,
         snapshot_controller: Option<Arc<SnapshotController>>,
         log_messages_bytes_limit: Option<usize>,
-        prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+        prioritization_fee_cache: &Option<Arc<PrioritizationFeeCache>>,
         banking_tracer: Arc<BankingTracer>,
         repair_response_quic_receiver: Receiver<(Pubkey, SocketAddr, Bytes)>,
         repair_request_quic_sender: AsyncSender<(SocketAddr, Bytes)>,
@@ -171,7 +200,24 @@ impl Tvu {
         wen_restart_repair_slots: Option<Arc<RwLock<Vec<Slot>>>>,
         slot_status_notifier: Option<SlotStatusNotifier>,
         vote_connection_cache: Arc<ConnectionCache>,
+        alpenglow_connection_cache: Arc<ConnectionCache>,
+        replay_highest_frozen: Arc<ReplayHighestFrozen>,
+        leader_window_info_sender: Sender<LeaderWindowInfo>,
+        highest_parent_ready: Arc<RwLock<(Slot, (Slot, Hash))>>,
+        voting_service_test_override: Option<VotingServiceOverride>,
+        votor_event_sender: VotorEventSender,
+        votor_event_receiver: VotorEventReceiver,
+        optimistic_parent_sender: Sender<LeaderWindowInfo>,
+        alpenglow_quic_server_config: SimpleQosQuicStreamerConfig,
+        staked_nodes: Arc<RwLock<StakedNodes>>,
+        key_notifiers: Arc<RwLock<KeyUpdaters>>,
+        alpenglow_last_voted: Arc<AlpenglowLastVoted>,
+        migration_status: Arc<MigrationStatus>,
+        cancel: CancellationToken,
     ) -> Result<Self, String> {
+        let (consensus_message_sender, consensus_message_receiver) =
+            bounded(MAX_ALPENGLOW_PACKET_NUM);
+        let (consensus_metrics_sender, consensus_metrics_receiver) = unbounded();
         let in_wen_restart = wen_restart_repair_slots.is_some();
 
         let TvuSockets {
@@ -183,6 +229,7 @@ impl Tvu {
         } = sockets;
 
         let (fetch_sender, fetch_receiver) = EvictingSender::new_bounded(SHRED_FETCH_CHANNEL_SIZE);
+        let (bls_packet_sender, bls_packet_receiver) = bounded(MAX_ALPENGLOW_PACKET_NUM);
 
         let repair_socket = Arc::new(repair_socket);
         let ancestor_hashes_socket = Arc::new(ancestor_hashes_socket);
@@ -200,6 +247,37 @@ impl Tvu {
             exit.clone(),
         );
 
+        // Streamer for Alpenglow
+        let SpawnServerResult {
+            endpoints: _,
+            thread: alpenglow_quic_t,
+            key_updater: alpenglow_stream_key_updater,
+        } = spawn_simple_qos_server(
+            "solQuicAlpglw",
+            "quic_streamer_alpenglow",
+            vec![alpenglow_socket.unwrap()],
+            &identity_keypair,
+            bls_packet_sender.clone(),
+            staked_nodes.clone(),
+            alpenglow_quic_server_config.quic_streamer_config,
+            alpenglow_quic_server_config.qos_config,
+            cancel.clone(),
+        )
+        .unwrap();
+        let alpenglow_sigverify_service = {
+            let sharable_banks = bank_forks.read().unwrap().sharable_banks();
+            let verifier = BLSSigVerifier::new(
+                sharable_banks,
+                verified_voter_slots_sender.clone(),
+                consensus_message_sender.clone(),
+                consensus_metrics_sender.clone(),
+                alpenglow_last_voted.clone(),
+            );
+            BLSSigverifyService::new(bls_packet_receiver, verifier)
+        };
+
+        let mut key_notifiers = key_notifiers.write().unwrap();
+        key_notifiers.add(KeyUpdaterType::TpuAlpenglow, alpenglow_stream_key_updater);
         let (verified_sender, verified_receiver) = unbounded();
 
         let (retransmit_sender, retransmit_receiver) =
@@ -293,6 +371,10 @@ impl Tvu {
         let (cost_update_sender, cost_update_receiver) = unbounded();
         let (drop_bank_sender, drop_bank_receiver) = unbounded();
         let (voting_sender, voting_receiver) = unbounded();
+        // The BLS sender channel should be mostly used during standstill handling,
+        // there could be 10s/400ms = 25 slots, <=5 votes and <=5 certificates per slot,
+        // we cap the channel at 512 to give some headroom.
+        let (bls_sender, bls_receiver) = bounded(512);
 
         let replay_senders = ReplaySenders {
             rpc_subscriptions,
@@ -306,9 +388,13 @@ impl Tvu {
             cluster_slots_update_sender,
             cost_update_sender,
             voting_sender,
+            bls_sender,
             drop_bank_sender,
             block_metadata_notifier,
             dumped_slots_sender,
+            votor_event_sender,
+            own_vote_sender: consensus_message_sender,
+            optimistic_parent_sender,
         };
 
         let replay_receivers = ReplayReceivers {
@@ -318,6 +404,8 @@ impl Tvu {
             duplicate_confirmed_slots_receiver,
             gossip_verified_vote_hash_receiver,
             popular_pruned_forks_receiver,
+            consensus_message_receiver,
+            votor_event_receiver,
         };
 
         let replay_stage_config = ReplayStageConfig {
@@ -337,12 +425,20 @@ impl Tvu {
             poh_recorder: poh_recorder.clone(),
             poh_controller,
             tower,
+            vote_history,
+            vote_history_storage: vote_history_storage.clone(),
             vote_tracker,
             cluster_slots,
             log_messages_bytes_limit,
-            prioritization_fee_cache,
+            prioritization_fee_cache: prioritization_fee_cache.clone(),
             banking_tracer,
             snapshot_controller,
+            replay_highest_frozen,
+            leader_window_info_sender,
+            highest_parent_ready,
+            consensus_metrics_sender: consensus_metrics_sender.clone(),
+            consensus_metrics_receiver,
+            migration_status,
         };
 
         let voting_service = VotingService::new(
@@ -351,8 +447,19 @@ impl Tvu {
             poh_recorder.clone(),
             tower_storage,
             vote_connection_cache.clone(),
-            alpenglow_socket,
+            None,
             bank_forks.clone(),
+        );
+
+        let alpenglow_voting_service = AlpenglowVotingService::new(
+            bls_receiver,
+            cluster_info.clone(),
+            vote_history_storage,
+            alpenglow_connection_cache,
+            bank_forks.clone(),
+            voting_service_test_override,
+            alpenglow_last_voted,
+            *vote_account,
         );
 
         let warm_quic_cache_service = create_cache_warmer_if_needed(
@@ -403,9 +510,12 @@ impl Tvu {
             blockstore_cleanup_service,
             cost_update_service,
             voting_service,
+            alpenglow_voting_service,
             warm_quic_cache_service,
             drop_bank_service,
             duplicate_shred_listener,
+            alpenglow_sigverify_service,
+            alpenglow_quic_t,
         })
     }
 
@@ -423,11 +533,14 @@ impl Tvu {
         }
         self.cost_update_service.join()?;
         self.voting_service.join()?;
+        self.alpenglow_voting_service.join()?;
         if let Some(warmup_service) = self.warm_quic_cache_service {
             warmup_service.join()?;
         }
         self.drop_bank_service.join()?;
         self.duplicate_shred_listener.join()?;
+        self.alpenglow_sigverify_service.join()?;
+        self.alpenglow_quic_t.join()?;
         Ok(())
     }
 }
@@ -461,6 +574,7 @@ pub mod tests {
             consensus::tower_storage::FileTowerStorage,
             repair::quic_endpoint::RepairQuicAsyncSenders,
         },
+        agave_votor::vote_history_storage::FileVoteHistoryStorage,
         serial_test::serial,
         solana_gossip::{cluster_info::ClusterInfo, node::Node},
         solana_keypair::Keypair,
@@ -475,6 +589,7 @@ pub mod tests {
         solana_rpc::optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
         solana_runtime::bank::Bank,
         solana_signer::Signer,
+        solana_streamer::{nonblocking::simple_qos::SimpleQosConfig, quic::QuicStreamerConfig},
         solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
         std::sync::atomic::{AtomicU64, Ordering},
     };
@@ -524,9 +639,10 @@ pub mod tests {
         let block_commitment_cache = Arc::new(RwLock::new(BlockCommitmentCache::default()));
         let (retransmit_slots_sender, _retransmit_slots_receiver) = unbounded();
         let (_gossip_verified_vote_hash_sender, gossip_verified_vote_hash_receiver) = unbounded();
-        let (_verified_vote_sender, verified_vote_receiver) = unbounded();
+        let (verified_vote_sender, verified_vote_receiver) = unbounded();
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
         let (_, gossip_confirmed_slots_receiver) = unbounded();
+        let (leader_window_info_sender, _) = bounded(1);
         let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
         let outstanding_repair_requests = Arc::<RwLock<OutstandingShredRepairs>>::default();
         let cluster_slots = Arc::new(ClusterSlots::default_for_tests());
@@ -546,10 +662,30 @@ pub mod tests {
                 DEFAULT_TPU_CONNECTION_POOL_SIZE,
             )
         };
+        let alpenglow_connection_cache = ConnectionCache::new_quic(
+            "connection_cache_alpenglow",
+            DEFAULT_TPU_CONNECTION_POOL_SIZE,
+        );
+        let (votor_event_sender, votor_event_receiver) = unbounded();
+        let highest_parent_ready = Arc::new(RwLock::default());
+        let (optimistic_parent_sender, _optimistic_parent_receiver) = unbounded();
+
+        let server_params = QuicStreamerConfig::default_for_tests();
+        let qos_config = SimpleQosConfig {
+            max_connections_per_peer: 2,
+            max_streams_per_second: 20,
+            ..Default::default()
+        };
+        let server_params = SimpleQosQuicStreamerConfig {
+            quic_streamer_config: server_params,
+            qos_config,
+        };
+        let cancel = CancellationToken::new();
 
         let tvu = Tvu::new(
             &vote_keypair.pubkey(),
             Arc::new(RwLock::new(vec![Arc::new(vote_keypair)])),
+            Arc::new(Keypair::new()),
             &bank_forks,
             &cref1,
             {
@@ -574,6 +710,8 @@ pub mod tests {
             poh_controller,
             Tower::default(),
             Arc::new(FileTowerStorage::default()),
+            VoteHistory::default(),
+            Arc::new(FileVoteHistoryStorage::default()),
             &leader_schedule_cache,
             exit.clone(),
             block_commitment_cache,
@@ -583,6 +721,7 @@ pub mod tests {
             Arc::<VoteTracker>::default(),
             retransmit_slots_sender,
             gossip_verified_vote_hash_receiver,
+            verified_vote_sender,
             verified_vote_receiver,
             replay_vote_sender,
             /*completed_data_sets_sender:*/ None,
@@ -594,7 +733,7 @@ pub mod tests {
             None,
             None, // snapshot_controller
             None,
-            None,
+            &None,
             BankingTracer::new_disabled(),
             repair_response_quic_receiver,
             repair_quic_async_senders.repair_request_quic_sender,
@@ -605,6 +744,20 @@ pub mod tests {
             wen_restart_repair_slots,
             None,
             Arc::new(connection_cache),
+            Arc::new(alpenglow_connection_cache),
+            Arc::new(ReplayHighestFrozen::default()),
+            leader_window_info_sender,
+            highest_parent_ready,
+            None,
+            votor_event_sender,
+            votor_event_receiver,
+            optimistic_parent_sender,
+            server_params,
+            Arc::new(RwLock::new(StakedNodes::default())),
+            Arc::new(RwLock::new(KeyUpdaters::default())),
+            Arc::new(AlpenglowLastVoted::default()),
+            Arc::new(MigrationStatus::default()),
+            cancel,
         )
         .expect("assume success");
         if enable_wen_restart {

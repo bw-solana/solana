@@ -1008,8 +1008,8 @@ impl TestValidator {
             config.fee_rate_governor.clone(),
             config.rent.clone(),
             solana_cluster_type::ClusterType::Development,
-            &feature_set,
             accounts.into_iter().collect(),
+            false,
         );
         genesis_config.epoch_schedule = config
             .epoch_schedule

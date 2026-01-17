@@ -11,6 +11,7 @@ use {
         snapshot_config::{SnapshotConfig, SnapshotUsage},
         ArchiveFormat, SnapshotInterval, SnapshotVersion,
     },
+    agave_votor::vote_history_storage,
     clap::{crate_name, value_t, value_t_or_exit, values_t, values_t_or_exit, ArgMatches},
     crossbeam_channel::unbounded,
     log::*,
@@ -296,6 +297,15 @@ pub fn execute(
         .unwrap_or_else(|| ledger_path.clone());
     let tower_storage: Arc<dyn tower_storage::TowerStorage> =
         Arc::new(tower_storage::FileTowerStorage::new(tower_path));
+    let vote_history_storage: Arc<dyn vote_history_storage::VoteHistoryStorage> = {
+        let vote_history_path = value_t!(matches, "vote_history_path", PathBuf)
+            .ok()
+            .unwrap_or_else(|| ledger_path.clone());
+
+        Arc::new(vote_history_storage::FileVoteHistoryStorage::new(
+            vote_history_path,
+        ))
+    };
 
     let accounts_index_limit =
         value_t!(matches, "accounts_index_limit", String).unwrap_or_else(|err| err.exit());
@@ -528,6 +538,7 @@ pub fn execute(
         logfile,
         require_tower: matches.is_present("require_tower"),
         tower_storage,
+        vote_history_storage,
         max_genesis_archive_unpacked_size: MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
         expected_genesis_hash: matches
             .value_of("expected_genesis_hash")
@@ -606,6 +617,7 @@ pub fn execute(
         turbine_disabled: Arc::<AtomicBool>::default(),
         retransmit_xdp,
         broadcast_stage_type: BroadcastStageType::Standard,
+        voting_service_test_override: None,
         block_verification_method: value_t_or_exit!(
             matches,
             "block_verification_method",
@@ -1010,6 +1022,18 @@ pub fn execute(
         },
     };
 
+    let alpenglow_quic_server_config = SimpleQosQuicStreamerConfig {
+        quic_streamer_config: QuicStreamerConfig {
+            max_connections_per_ipaddr_per_min: tpu_max_connections_per_ipaddr_per_minute,
+            num_threads: tpu_vote_transaction_receive_threads,
+            ..Default::default()
+        },
+        qos_config: SimpleQosConfig {
+            max_streams_per_second: MAX_VOTES_PER_SECOND,
+            ..Default::default()
+        },
+    };
+
     let validator = match Validator::new(
         node,
         identity_keypair,
@@ -1028,6 +1052,7 @@ pub fn execute(
             tpu_quic_server_config,
             tpu_fwd_quic_server_config,
             vote_quic_server_config,
+            alpenglow_quic_server_config,
         },
         admin_service_post_init,
     ) {
