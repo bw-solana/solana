@@ -11719,6 +11719,7 @@ dependencies = [
  "agave-feature-set",
  "agave-logger",
  "agave-votor",
+ "agave-votor-messages",
  "agave-xdp",
  "arc-swap",
  "assert_matches",

@@ -1787,6 +1787,7 @@ impl Validator {
             bank_notification_sender,
             duplicate_confirmed_slot_sender,
             forwarding_tpu_client,
+            votor_event_sender.clone(),
             &identity_keypair,
             config.runtime_config.log_messages_bytes_limit,
             &staked_nodes,
@@ -1811,6 +1812,7 @@ impl Validator {
                 )
             }),
             cancel,
+            migration_status,
         );
 
         datapoint_info!(

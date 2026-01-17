@@ -51,6 +51,7 @@ impl BroadcastRun for FailEntryVerificationBroadcastRun {
         receiver: &Receiver<WorkingBankEntry>,
         socket_sender: &Sender<(Arc<Vec<Shred>>, Option<BroadcastShredBatchInfo>)>,
         blockstore_sender: &Sender<(Arc<Vec<Shred>>, Option<BroadcastShredBatchInfo>)>,
+        _votor_event_sender: &VotorEventSender,
     ) -> Result<()> {
         // 1) Pull entries from banking stage
         let mut stats = ProcessShredsStats::default();

@@ -25,6 +25,8 @@ use {
         validator::{BlockProductionMethod, GeneratorConfig},
         vortexor_receiver_adapter::VortexorReceiverAdapter,
     },
+    agave_votor::event::VotorEventSender,
+    agave_votor_messages::migration::MigrationStatus,
     crossbeam_channel::{bounded, unbounded, Receiver},
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
@@ -147,6 +149,7 @@ impl Tpu {
         bank_notification_sender: Option<BankNotificationSenderConfig>,
         duplicate_confirmed_slot_sender: DuplicateConfirmedSlotsSender,
         client: ForwardingClientOption,
+        votor_event_sender: VotorEventSender,
         keypair: &Keypair,
         log_messages_bytes_limit: Option<usize>,
         staked_nodes: &Arc<RwLock<StakedNodes>>,
@@ -166,6 +169,7 @@ impl Tpu {
         banking_control_receiver: mpsc::Receiver<BankingControlMsg>,
         scheduler_bindings: Option<(PathBuf, mpsc::Sender<BankingControlMsg>)>,
         cancel: CancellationToken,
+        migration_status: Arc<MigrationStatus>,
     ) -> Self {
         let TpuSockets {
             vote: tpu_vote_sockets,
@@ -384,6 +388,8 @@ impl Tpu {
             bank_forks,
             shred_version,
             xdp_sender,
+            votor_event_sender,
+            migration_status,
         );
 
         let mut key_notifiers = key_notifiers.write().unwrap();

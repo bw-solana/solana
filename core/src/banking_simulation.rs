@@ -758,6 +758,7 @@ impl BankingSimulator {
         let (record_sender, record_receiver) = record_channels(false);
         let transaction_recorder = TransactionRecorder::new(record_sender);
         let (poh_controller, poh_service_message_receiver) = PohController::new();
+        let migration_status = Arc::new(MigrationStatus::default());
         let (record_receiver_sender, _record_receiver_receiver) = bounded(1);
         let poh_service = PohService::new(
             poh_recorder.clone(),
@@ -768,7 +769,7 @@ impl BankingSimulator {
             DEFAULT_HASHES_PER_BATCH,
             record_receiver,
             poh_service_message_receiver,
-            Arc::new(MigrationStatus::default()),
+            migration_status.clone(),
             record_receiver_sender,
         );
 
@@ -814,6 +815,7 @@ impl BankingSimulator {
 
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
         let (retransmit_slots_sender, retransmit_slots_receiver) = unbounded();
+        let (completed_block_sender, _completed_block_receiver) = unbounded();
         let shred_version = compute_shred_version(
             &genesis_config.hash(),
             Some(&bank_forks.read().unwrap().root_bank().hard_forks()),
@@ -846,6 +848,8 @@ impl BankingSimulator {
             bank_forks.clone(),
             shred_version,
             None,
+            completed_block_sender,
+            migration_status,
         );
 
         info!("Start banking stage!...");

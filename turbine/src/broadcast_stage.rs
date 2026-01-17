@@ -12,6 +12,8 @@ use {
         cluster_nodes::{ClusterNodes, ClusterNodesCache},
         xdp::XdpSender,
     },
+    agave_votor::event::VotorEventSender,
+    agave_votor_messages::migration::MigrationStatus,
     crossbeam_channel::{Receiver, RecvError, RecvTimeoutError, Sender, unbounded},
     itertools::Itertools,
     solana_clock::Slot,
@@ -123,6 +125,8 @@ impl BroadcastStageType {
         bank_forks: Arc<RwLock<BankForks>>,
         shred_version: u16,
         xdp_sender: Option<XdpSender>,
+        votor_event_sender: VotorEventSender,
+        migration_status: Arc<MigrationStatus>,
     ) -> BroadcastStage {
         match self {
             BroadcastStageType::Standard => BroadcastStage::new(
@@ -133,7 +137,8 @@ impl BroadcastStageType {
                 exit_sender,
                 blockstore,
                 bank_forks,
-                StandardBroadcastRun::new(shred_version),
+                votor_event_sender.clone(),
+                StandardBroadcastRun::new(shred_version, migration_status),
                 xdp_sender,
             ),
 
@@ -145,6 +150,7 @@ impl BroadcastStageType {
                 exit_sender,
                 blockstore,
                 bank_forks,
+                votor_event_sender.clone(),
                 FailEntryVerificationBroadcastRun::new(shred_version),
                 xdp_sender,
             ),
@@ -157,6 +163,7 @@ impl BroadcastStageType {
                 exit_sender,
                 blockstore,
                 bank_forks,
+                votor_event_sender.clone(),
                 BroadcastFakeShredsRun::new(0, shred_version),
                 xdp_sender,
             ),
@@ -169,6 +176,7 @@ impl BroadcastStageType {
                 exit_sender,
                 blockstore,
                 bank_forks,
+                votor_event_sender.clone(),
                 BroadcastDuplicatesRun::new(shred_version, config.clone()),
                 xdp_sender,
             ),
@@ -184,6 +192,7 @@ trait BroadcastRun {
         receiver: &Receiver<WorkingBankEntry>,
         socket_sender: &Sender<(Arc<Vec<Shred>>, Option<BroadcastShredBatchInfo>)>,
         blockstore_sender: &Sender<(Arc<Vec<Shred>>, Option<BroadcastShredBatchInfo>)>,
+        votor_event_sender: &VotorEventSender,
     ) -> Result<()>;
     fn transmit(
         &mut self,
@@ -225,6 +234,7 @@ impl BroadcastStage {
         receiver: &Receiver<WorkingBankEntry>,
         socket_sender: &Sender<(Arc<Vec<Shred>>, Option<BroadcastShredBatchInfo>)>,
         blockstore_sender: &Sender<(Arc<Vec<Shred>>, Option<BroadcastShredBatchInfo>)>,
+        votor_event_sender: &VotorEventSender,
         mut broadcast_stage_run: impl BroadcastRun,
     ) -> BroadcastStageReturnType {
         loop {
@@ -234,6 +244,7 @@ impl BroadcastStage {
                 receiver,
                 socket_sender,
                 blockstore_sender,
+                votor_event_sender,
             );
             let res = Self::handle_error(res, "run");
             if let Some(res) = res {
@@ -285,6 +296,7 @@ impl BroadcastStage {
         exit: Arc<AtomicBool>,
         blockstore: Arc<Blockstore>,
         bank_forks: Arc<RwLock<BankForks>>,
+        votor_event_sender: VotorEventSender,
         mut broadcast_stage_run: impl BroadcastRun + Send + 'static + Clone,
         xdp_sender: Option<XdpSender>,
     ) -> Self {
@@ -306,6 +318,7 @@ impl BroadcastStage {
                         &receiver,
                         &socket_sender_,
                         &blockstore_sender,
+                        &votor_event_sender,
                         bs_run,
                     )
                 })
@@ -732,6 +745,8 @@ pub mod test {
         let bank_forks = BankForks::new_rw_arc(bank);
         let bank = bank_forks.read().unwrap().root_bank();
 
+        let (votor_event_sender, _) = unbounded();
+
         // Start up the broadcast stage
         let broadcast_service = BroadcastStage::new(
             leader_info.sockets.broadcast,
@@ -741,7 +756,8 @@ pub mod test {
             exit_sender,
             blockstore.clone(),
             bank_forks,
-            StandardBroadcastRun::new(0),
+            votor_event_sender,
+            StandardBroadcastRun::new(0, Arc::new(MigrationStatus::default())),
             None,
         );
 
