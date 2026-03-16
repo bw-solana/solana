@@ -31,7 +31,6 @@ frozen-abi = [
     "solana-account/frozen-abi",
     "solana-accounts-db/frozen-abi",
     "solana-bls-signatures/frozen-abi",
-    "solana-compute-budget/frozen-abi",
     "solana-cost-model/frozen-abi",
     "solana-epoch-schedule/frozen-abi",
     "solana-hard-forks/frozen-abi",
@@ -119,10 +118,10 @@ solana-frozen-abi = { workspace = true, optional = true, features = [
 solana-frozen-abi-macro = { workspace = true, optional = true, features = [
     "frozen-abi",
 ] }
-solana-genesis-config = { workspace = true }
+solana-genesis-config = { workspace = true, features = ["serde"] }
 solana-hard-forks = { workspace = true, features = ["serde"] }
-solana-hash = { workspace = true }
-solana-inflation = { workspace = true }
+solana-hash = { workspace = true, features = ["atomic"] }
+solana-inflation = { workspace = true, features = ["serde"] }
 solana-instruction = { workspace = true }
 solana-keypair = { workspace = true, features = ["seed-derivable"] }
 solana-lattice-hash = { workspace = true }
@@ -183,36 +182,40 @@ thiserror = { workspace = true }
 wincode = { workspace = true }
 
 [dev-dependencies]
-agave-logger = { workspace = true }
-agave-transaction-view = { workspace = true }
+agave-logger = { path = "../logger", features = ["agave-unstable-api"] }
+agave-transaction-view = { path = "../transaction-view", features = ["agave-unstable-api"] }
 bitvec = { workspace = true }
+criterion = { workspace = true }
 libsecp256k1 = { workspace = true }
 memoffset = { workspace = true }
 proptest = { workspace = true }
-solana-accounts-db = { workspace = true, features = ["dev-context-only-utils"] }
-solana-builtins = { workspace = true, features = ["dev-context-only-utils"] }
+solana-accounts-db = { path = "../accounts-db", features = ["agave-unstable-api", "dev-context-only-utils"] }
+solana-builtins = { path = "../builtins", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-instruction-error = { workspace = true }
-solana-program-binaries = { workspace = true }
+solana-program-binaries = { path = "../program-binaries", features = ["agave-unstable-api"] }
 # See order-crates-for-publishing.py for using this unusual `path = "."`
 solana-runtime = { path = ".", features = ["agave-unstable-api", "dev-context-only-utils"] }
-solana-runtime-transaction = { workspace = true, features = [
-    "dev-context-only-utils",
-] }
+solana-runtime-transaction = { path = "../runtime-transaction", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-sdk-ids = { workspace = true }
 solana-secp256k1-program = { workspace = true, features = ["bincode"] }
 solana-signature = { workspace = true, features = ["std"] }
 solana-signer-store = { workspace = true }
 solana-stake-interface = { workspace = true, features = ["sysvar"] }
-solana-svm = { workspace = true, features = ["dev-context-only-utils"] }
-solana-transaction-context = { workspace = true, features = [
-    "dev-context-only-utils",
-] }
-solana-vote-program = { workspace = true, features = ["dev-context-only-utils"] }
+solana-svm = { path = "../svm", features = ["agave-unstable-api", "dev-context-only-utils"] }
+solana-transaction-context = { path = "../transaction-context", features = ["agave-unstable-api", "bincode", "dev-context-only-utils"] }
+solana-vote-program = { path = "../programs/vote", default-features = false, features = ["agave-unstable-api", "dev-context-only-utils"] }
 static_assertions = { workspace = true }
 test-case = { workspace = true }
 
+[target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dev-dependencies]
+jemallocator = { workspace = true }
+
 [[bench]]
 name = "prioritization_fee_cache"
+
+[[bench]]
+name = "epoch_turnover"
+harness = false
 
 [lints]
 workspace = true

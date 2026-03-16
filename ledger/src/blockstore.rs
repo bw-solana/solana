@@ -26,7 +26,6 @@ use {
     agave_feature_set::FeatureSet,
     agave_snapshots::unpack_genesis_archive,
     assert_matches::debug_assert_matches,
-    bincode::{deserialize, serialize},
     crossbeam_channel::{Receiver, Sender, TrySendError, bounded},
     dashmap::DashSet,
     itertools::Itertools,
@@ -74,7 +73,7 @@ use {
         convert::TryInto,
         fmt::Write,
         fs::{self, File},
-        io::{Error as IoError, ErrorKind},
+        io::Error as IoError,
         ops::{Bound, Range},
         path::{Path, PathBuf},
         rc::Rc,
@@ -635,7 +634,7 @@ impl Blockstore {
         let candidate_fec_set_index = u32::try_from(candidate_fec_set_index)
             .expect("fec_set_index from a previously inserted shred should fit in u32");
         let candidate_erasure_set = ErasureSetId::new(slot, candidate_fec_set_index);
-        let candidate_erasure_meta: ErasureMeta = deserialize(candidate_erasure_meta.as_ref())?;
+        let candidate_erasure_meta = cf::ErasureMeta::deserialize(candidate_erasure_meta.as_ref())?;
 
         // Check if this is actually the consecutive erasure set
         let Some(next_fec_set_index) = candidate_erasure_meta.next_fec_set_index() else {
@@ -754,7 +753,7 @@ impl Blockstore {
     ) -> Result<impl Iterator<Item = (Slot, Hash, UnixTimestamp)> + '_> {
         let iter = self.optimistic_slots_cf.iter(IteratorMode::End)?;
         Ok(iter.map(|(slot, bytes)| {
-            let meta: OptimisticSlotMetaVersioned = deserialize(&bytes).unwrap();
+            let meta = cf::OptimisticSlots::deserialize(&bytes).unwrap();
             (slot, meta.hash(), meta.timestamp())
         }))
     }
@@ -1477,7 +1476,13 @@ impl Blockstore {
         } = shred_insertion_tracker;
 
         let index_meta_working_set_entry =
-            self.get_index_meta_entry(slot, index_working_set, index_meta_time_us);
+            match self.get_index_meta_entry(slot, index_working_set, index_meta_time_us) {
+                Ok(entry) => entry,
+                Err(err) => {
+                    error!("blockstore error during coding shred insertion: {err}");
+                    return false;
+                }
+            };
 
         let index_meta = &mut index_meta_working_set_entry.index;
         let erasure_set = shred.erasure_set();
@@ -1687,7 +1692,7 @@ impl Blockstore {
         } = shred_insertion_tracker;
 
         let index_meta_working_set_entry =
-            self.get_index_meta_entry(slot, index_working_set, index_meta_time_us);
+            self.get_index_meta_entry(slot, index_working_set, index_meta_time_us)?;
         let index_meta = &mut index_meta_working_set_entry.index;
         let slot_meta_entry = self.get_slot_meta_entry(
             slot_meta_working_set,
@@ -1695,7 +1700,7 @@ impl Blockstore {
             shred
                 .parent()
                 .map_err(|_| InsertDataShredError::InvalidShred)?,
-        );
+        )?;
 
         let slot_meta = &mut slot_meta_entry.new_slot_meta.borrow_mut();
         let erasure_set = shred.erasure_set();
@@ -2214,12 +2219,42 @@ impl Blockstore {
             return false;
         }
 
-        // TODO Shouldn't this use shred.parent() instead and update
-        // slot_meta.parent_slot accordingly?
-        slot_meta
-            .parent_slot
-            .map(|parent_slot| verify_shred_slots(slot, parent_slot, max_root))
-            .unwrap_or_default()
+        let Some(meta_parent_slot) = slot_meta.parent_slot else {
+            return false;
+        };
+
+        let Ok(shred_parent) = shred.parent() else {
+            warn!(
+                "Invalid data shred could not get parent slot shred_id {:?}",
+                shred.id()
+            );
+            return false;
+        };
+
+        if meta_parent_slot != shred_parent {
+            let leader_pubkey = leader_schedule
+                .and_then(|leader_schedule| leader_schedule.slot_leader_at(slot, None));
+
+            datapoint_error!(
+                "blockstore_error",
+                (
+                    "error",
+                    format!(
+                        "Leader {:?}, shred_id {:?}: received shred with parent {} but slot_meta \
+                         has parent {}",
+                        leader_pubkey,
+                        shred.id(),
+                        shred_parent,
+                        meta_parent_slot
+                    ),
+                    String
+                )
+            );
+
+            return false;
+        }
+
+        verify_shred_slots(slot, meta_parent_slot, max_root)
     }
 
     fn insert_data_shred<'a>(
@@ -2892,7 +2927,7 @@ impl Blockstore {
         let iterator = self.transaction_status_index_cf.iter(IteratorMode::Start)?;
         let mut highest_primary_index_slot = None;
         for (_, data) in iterator {
-            let meta: TransactionStatusIndexMeta = deserialize(&data).unwrap();
+            let meta = cf::TransactionStatusIndex::deserialize(&data).unwrap();
             if highest_primary_index_slot.is_none()
                 || highest_primary_index_slot.is_some_and(|slot| slot < meta.max_slot)
             {
@@ -3534,35 +3569,19 @@ impl Blockstore {
         // or `PerfSampleV2` encoding.  We expect `PerfSampleV1` to be a prefix of the
         // `PerfSampleV2` encoding (see [`perf_sample_v1_is_prefix_of_perf_sample_v2`]), so we try
         // them in order.
-        let samples =
-            self.perf_samples_cf
-                .iter(IteratorMode::End)?
-                .take(num)
-                .map(|(slot, data)| {
-                    deserialize::<PerfSampleV2>(&data)
-                        .map(|sample| (slot, sample.into()))
-                        .or_else(|err| {
-                            match &*err {
-                                bincode::ErrorKind::Io(io_err)
-                                    if matches!(io_err.kind(), ErrorKind::UnexpectedEof) =>
-                                {
-                                    // Not enough bytes to deserialize as `PerfSampleV2`.
-                                }
-                                _ => return Err(err),
-                            }
-
-                            deserialize::<PerfSampleV1>(&data).map(|sample| (slot, sample.into()))
-                        })
-                        .map_err(Into::into)
-                });
+        let samples = self
+            .perf_samples_cf
+            .iter(IteratorMode::End)?
+            .take(num)
+            .map(|(slot, data)| cf::PerfSamples::deserialize(&data).map(|sample| (slot, sample)));
 
         samples.collect()
     }
 
-    pub fn write_perf_sample(&self, index: Slot, perf_sample: &PerfSampleV2) -> Result<()> {
+    pub fn write_perf_sample(&self, index: Slot, perf_sample: &PerfSample) -> Result<()> {
         // Always write as the current version.
         let bytes =
-            serialize(&perf_sample).expect("`PerfSampleV2` can be serialized with `bincode`");
+            cf::PerfSamples::serialize(perf_sample).expect("`PerfSample` can be serialized");
         self.perf_samples_cf.put_bytes(index, &bytes)
     }
 
@@ -4130,8 +4149,9 @@ impl Blockstore {
             .duplicate_slots_cf
             .iter(IteratorMode::From(0, IteratorDirection::Forward))
             .unwrap();
-        iter.next()
-            .map(|(slot, proof_bytes)| (slot, deserialize(&proof_bytes).unwrap()))
+        iter.next().map(|(slot, proof_bytes)| {
+            (slot, cf::DuplicateSlots::deserialize(&proof_bytes).unwrap())
+        })
     }
 
     pub fn store_duplicate_slot<S, T>(&self, slot: Slot, shred1: S, shred2: T) -> Result<()>
@@ -4650,32 +4670,29 @@ impl Blockstore {
         slot_meta_working_set: &'a mut HashMap<u64, SlotMetaWorkingSetEntry>,
         slot: Slot,
         parent_slot: Slot,
-    ) -> &'a mut SlotMetaWorkingSetEntry {
+    ) -> Result<&'a mut SlotMetaWorkingSetEntry> {
         // Check if we've already inserted the slot metadata for this shred's slot
-        slot_meta_working_set.entry(slot).or_insert_with(|| {
-            // Store a 2-tuple of the metadata (working copy, backup copy)
-            if let Some(mut meta) = self
-                .meta_cf
-                .get(slot)
-                .expect("Expect database get to succeed")
-            {
-                let backup = Some(meta.clone());
-                // If parent_slot == None, then this is one of the orphans inserted
-                // during the chaining process, see the function find_slot_meta_in_cached_state()
-                // for details. Slots that are orphans are missing a parent_slot, so we should
-                // fill in the parent now that we know it.
-                if meta.is_orphan() {
-                    meta.parent_slot = Some(parent_slot);
-                }
-
-                SlotMetaWorkingSetEntry::new(Rc::new(RefCell::new(meta)), backup)
-            } else {
-                SlotMetaWorkingSetEntry::new(
-                    Rc::new(RefCell::new(SlotMeta::new(slot, Some(parent_slot)))),
-                    None,
-                )
+        let entry = match slot_meta_working_set.entry(slot) {
+            HashMapEntry::Occupied(occupied_entry) => occupied_entry.into_mut(),
+            HashMapEntry::Vacant(vacant_entry) => {
+                let meta = self.meta_cf.get(slot)?;
+                // Insert a new 2-tuple of the metadata (working copy, backup copy)
+                let slot_meta_entry = if let Some(mut meta) = meta {
+                    let backup = Some(meta.clone());
+                    if meta.is_orphan() {
+                        meta.parent_slot = Some(parent_slot);
+                    }
+                    SlotMetaWorkingSetEntry::new(Rc::new(RefCell::new(meta)), backup)
+                } else {
+                    SlotMetaWorkingSetEntry::new(
+                        Rc::new(RefCell::new(SlotMeta::new(slot, Some(parent_slot)))),
+                        None,
+                    )
+                };
+                vacant_entry.insert(slot_meta_entry)
             }
-        })
+        };
+        Ok(entry)
     }
 
     /// Returns the `SlotMeta` with the specified `slot_index`.  The resulting
@@ -4728,22 +4745,25 @@ impl Blockstore {
         slot: Slot,
         index_working_set: &'a mut HashMap<u64, IndexMetaWorkingSetEntry>,
         index_meta_time_us: &mut u64,
-    ) -> &'a mut IndexMetaWorkingSetEntry {
+    ) -> Result<&'a mut IndexMetaWorkingSetEntry> {
         let mut total_start = Measure::start("Total elapsed");
-        let res = index_working_set.entry(slot).or_insert_with(|| {
-            let newly_inserted_meta = self
-                .index_cf
-                .get(slot)
-                .unwrap()
-                .unwrap_or_else(|| Index::new(slot));
-            IndexMetaWorkingSetEntry {
-                index: newly_inserted_meta,
-                did_insert_occur: false,
+
+        let index_meta_entry = match index_working_set.entry(slot) {
+            HashMapEntry::Occupied(occupied_entry) => occupied_entry.into_mut(),
+            HashMapEntry::Vacant(vacant_entry) => {
+                let index = self.index_cf.get(slot)?.unwrap_or_else(|| Index::new(slot));
+                let index_entry = IndexMetaWorkingSetEntry {
+                    index,
+                    did_insert_occur: false,
+                };
+                vacant_entry.insert(index_entry)
             }
-        });
+        };
+
         total_start.stop();
         *index_meta_time_us += total_start.as_us();
-        res
+
+        Ok(index_meta_entry)
     }
 
     pub fn get_write_batch(&self) -> Result<WriteBatch> {
@@ -5364,10 +5384,10 @@ pub mod tests {
         super::*,
         crate::{
             genesis_utils::{GenesisConfigInfo, create_genesis_config},
-            shred::{MAX_DATA_SHREDS_PER_SLOT, max_ticks_per_n_shreds},
+            shred::max_ticks_per_n_shreds,
         },
         assert_matches::assert_matches,
-        bincode::{Options, serialize},
+        bincode::serialize,
         crossbeam_channel::unbounded,
         rand::{rng, seq::SliceRandom},
         solana_account_decoder::parse_token::UiTokenAmount,
@@ -5828,36 +5848,6 @@ pub mod tests {
     fn test_insert_slots() {
         test_insert_data_shreds_slots(false);
         test_insert_data_shreds_slots(true);
-    }
-
-    #[test]
-    fn test_index_fallback_deserialize() {
-        let ledger_path = get_tmp_ledger_path_auto_delete!();
-        let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-        let mut rng = rand::rng();
-        let slot = rng.random_range(0..100);
-        let bincode = bincode::DefaultOptions::new()
-            .reject_trailing_bytes()
-            .with_fixint_encoding();
-
-        let data = 0..rng.random_range(100..MAX_DATA_SHREDS_PER_SLOT as u64);
-        let coding = 0..rng.random_range(100..MAX_DATA_SHREDS_PER_SLOT as u64);
-        let mut fallback = IndexFallback::new(slot);
-        for (d, c) in data.clone().zip(coding.clone()) {
-            fallback.data_mut().insert(d);
-            fallback.coding_mut().insert(c);
-        }
-
-        blockstore
-            .index_cf
-            .put_bytes(slot, &bincode.serialize(&fallback).unwrap())
-            .unwrap();
-
-        let current = blockstore.index_cf.get(slot).unwrap().unwrap();
-        for (d, c) in data.zip(coding) {
-            assert!(current.data().contains(d));
-            assert!(current.coding().contains(c));
-        }
     }
 
     #[test]
@@ -7889,7 +7879,7 @@ pub mod tests {
         // range:
         // [start_index, completed_data_end_indexes[j]] ==
         // [completed_data_end_indexes[i], completed_data_end_indexes[j]],
-        let completed_data_end_indexes: Vec<_> = completed_data_end_indexes.into_iter().collect();
+        let completed_data_end_indexes: Vec<_> = completed_data_end_indexes.iter().collect();
         for i in 0..completed_data_end_indexes.len() {
             for j in i..completed_data_end_indexes.len() {
                 let start_index = completed_data_end_indexes[i];
@@ -9875,120 +9865,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_get_recent_perf_samples_v1_only() {
-        let ledger_path = get_tmp_ledger_path_auto_delete!();
-        let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-        let num_entries: usize = 10;
-
-        let slot_sample = |i: u64| PerfSampleV1 {
-            num_transactions: 1406 + i,
-            num_slots: 34 + i / 2,
-            sample_period_secs: (40 + i / 5) as u16,
-        };
-
-        let mut perf_samples: Vec<(Slot, PerfSample)> = vec![];
-        for i in 0..num_entries {
-            let slot = (i + 1) as u64 * 50;
-            let sample = slot_sample(i as u64);
-
-            let bytes = serialize(&sample).unwrap();
-            blockstore.perf_samples_cf.put_bytes(slot, &bytes).unwrap();
-            perf_samples.push((slot, sample.into()));
-        }
-
-        for i in 0..num_entries {
-            let mut expected_samples = perf_samples[num_entries - 1 - i..].to_vec();
-            expected_samples.sort_by_key(|b| cmp::Reverse(b.0));
-            assert_eq!(
-                blockstore.get_recent_perf_samples(i + 1).unwrap(),
-                expected_samples
-            );
-        }
-    }
-
-    #[test]
-    fn test_get_recent_perf_samples_v2_only() {
-        let ledger_path = get_tmp_ledger_path_auto_delete!();
-        let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-        let num_entries: usize = 10;
-
-        let slot_sample = |i: u64| PerfSampleV2 {
-            num_transactions: 2495 + i,
-            num_slots: 167 + i / 2,
-            sample_period_secs: (37 + i / 5) as u16,
-            num_non_vote_transactions: 1672 + i,
-        };
-
-        let mut perf_samples: Vec<(Slot, PerfSample)> = vec![];
-        for i in 0..num_entries {
-            let slot = (i + 1) as u64 * 50;
-            let sample = slot_sample(i as u64);
-
-            let bytes = serialize(&sample).unwrap();
-            blockstore.perf_samples_cf.put_bytes(slot, &bytes).unwrap();
-            perf_samples.push((slot, sample.into()));
-        }
-
-        for i in 0..num_entries {
-            let mut expected_samples = perf_samples[num_entries - 1 - i..].to_vec();
-            expected_samples.sort_by_key(|b| cmp::Reverse(b.0));
-            assert_eq!(
-                blockstore.get_recent_perf_samples(i + 1).unwrap(),
-                expected_samples
-            );
-        }
-    }
-
-    #[test]
-    fn test_get_recent_perf_samples_v1_and_v2() {
-        let ledger_path = get_tmp_ledger_path_auto_delete!();
-        let blockstore = Blockstore::open(ledger_path.path()).unwrap();
-
-        let num_entries: usize = 10;
-
-        let slot_sample_v1 = |i: u64| PerfSampleV1 {
-            num_transactions: 1599 + i,
-            num_slots: 123 + i / 2,
-            sample_period_secs: (42 + i / 5) as u16,
-        };
-
-        let slot_sample_v2 = |i: u64| PerfSampleV2 {
-            num_transactions: 5809 + i,
-            num_slots: 81 + i / 2,
-            sample_period_secs: (35 + i / 5) as u16,
-            num_non_vote_transactions: 2209 + i,
-        };
-
-        let mut perf_samples: Vec<(Slot, PerfSample)> = vec![];
-        for i in 0..num_entries {
-            let slot = (i + 1) as u64 * 50;
-
-            if i % 3 == 0 {
-                let sample = slot_sample_v1(i as u64);
-                let bytes = serialize(&sample).unwrap();
-                blockstore.perf_samples_cf.put_bytes(slot, &bytes).unwrap();
-                perf_samples.push((slot, sample.into()));
-            } else {
-                let sample = slot_sample_v2(i as u64);
-                let bytes = serialize(&sample).unwrap();
-                blockstore.perf_samples_cf.put_bytes(slot, &bytes).unwrap();
-                perf_samples.push((slot, sample.into()));
-            }
-        }
-
-        for i in 0..num_entries {
-            let mut expected_samples = perf_samples[num_entries - 1 - i..].to_vec();
-            expected_samples.sort_by_key(|b| cmp::Reverse(b.0));
-            assert_eq!(
-                blockstore.get_recent_perf_samples(i + 1).unwrap(),
-                expected_samples
-            );
-        }
-    }
-
-    #[test]
     fn test_write_perf_samples() {
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Blockstore::open(ledger_path.path()).unwrap();
@@ -9997,7 +9873,7 @@ pub mod tests {
         let mut perf_samples: Vec<(Slot, PerfSample)> = vec![];
         for x in 1..num_entries + 1 {
             let slot = x as u64 * 50;
-            let sample = PerfSampleV2 {
+            let sample = PerfSample {
                 num_transactions: 1000 + x as u64,
                 num_slots: 50,
                 sample_period_secs: 20,
@@ -10005,7 +9881,7 @@ pub mod tests {
             };
 
             blockstore.write_perf_sample(slot, &sample).unwrap();
-            perf_samples.push((slot, PerfSample::V2(sample)));
+            perf_samples.push((slot, sample));
         }
 
         for x in 0..num_entries {
@@ -10505,7 +10381,7 @@ pub mod tests {
                 update_completed_data_indexes(true, i, &shred_index, &mut completed_data_indexes)
                     .eq(std::iter::once(i..i + 1))
             );
-            assert!(completed_data_indexes.clone().into_iter().eq(0..=i));
+            assert!(completed_data_indexes.iter().eq(0..=i));
         }
     }
 
@@ -10533,7 +10409,7 @@ pub mod tests {
             update_completed_data_indexes(true, 3, &shred_index, &mut completed_data_indexes)
                 .eq([])
         );
-        assert!(completed_data_indexes.clone().into_iter().eq([3]));
+        assert!(completed_data_indexes.clone().iter().eq([3]));
 
         // Inserting data complete shred 1 now confirms the range of shreds [2, 3]
         // is part of the same data set
@@ -10542,7 +10418,7 @@ pub mod tests {
             update_completed_data_indexes(true, 1, &shred_index, &mut completed_data_indexes)
                 .eq(std::iter::once(2..4))
         );
-        assert!(completed_data_indexes.clone().into_iter().eq([1, 3]));
+        assert!(completed_data_indexes.clone().iter().eq([1, 3]));
 
         // Inserting data complete shred 0 now confirms the range of shreds [0]
         // is part of the same data set
@@ -10551,7 +10427,7 @@ pub mod tests {
             update_completed_data_indexes(true, 0, &shred_index, &mut completed_data_indexes)
                 .eq([0..1, 1..2])
         );
-        assert!(completed_data_indexes.clone().into_iter().eq([0, 1, 3]));
+        assert!(completed_data_indexes.clone().iter().eq([0, 1, 3]));
     }
 
     #[test]

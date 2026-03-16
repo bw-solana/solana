@@ -2,7 +2,7 @@
 use {
     crate::{
         blockstore::error::Result,
-        blockstore_meta::{self},
+        blockstore_meta::{self, PerfSample},
     },
     bincode::Options as BincodeOptions,
     serde::{Serialize, de::DeserializeOwned},
@@ -594,6 +594,10 @@ impl ColumnName for columns::PerfSamples {
     const NAME: &'static str = "perf_samples";
 }
 
+impl TypedColumn for columns::PerfSamples {
+    type Type = PerfSample;
+}
+
 impl SlotColumn for columns::BlockHeight {}
 impl ColumnName for columns::BlockHeight {
     const NAME: &'static str = "block_height";
@@ -672,20 +676,7 @@ impl TypedColumn for columns::Index {
             .with_fixint_encoding()
             .reject_trailing_bytes();
 
-        // Migration strategy for new column format:
-        // 1. Release 1: Add ability to read new format as fallback, keep writing old format
-        // 2. Release 2: Switch to writing new format, keep reading old format as fallback
-        // 3. Release 3: Remove old format support once stable
-        // This allows safe downgrade to Release 1 since it can read both formats
-        // https://github.com/anza-xyz/agave/issues/3570
-        let index: bincode::Result<blockstore_meta::Index> = config.deserialize(data);
-        match index {
-            Ok(index) => Ok(index),
-            Err(_) => {
-                let index: blockstore_meta::IndexFallback = config.deserialize(data)?;
-                Ok(index.into())
-            }
-        }
+        Ok(config.deserialize(data)?)
     }
 }
 
@@ -745,19 +736,7 @@ impl TypedColumn for columns::SlotMeta {
             .with_fixint_encoding()
             .reject_trailing_bytes();
 
-        // Migration strategy for new column format:
-        // 1. Release 1: Add ability to read new format as fallback, keep writing old format
-        // 2. Release 2: Switch to writing new format, keep reading old format as fallback
-        // 3. Release 3: Remove old format support once stable
-        // This allows safe downgrade to Release 1 since it can read both formats
-        let index: bincode::Result<blockstore_meta::SlotMeta> = config.deserialize(data);
-        match index {
-            Ok(index) => Ok(index),
-            Err(_) => {
-                let index: blockstore_meta::SlotMetaFallback = config.deserialize(data)?;
-                Ok(index.into())
-            }
-        }
+        Ok(config.deserialize(data)?)
     }
 }
 

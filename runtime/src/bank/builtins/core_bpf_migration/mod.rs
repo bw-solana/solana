@@ -137,9 +137,9 @@ impl Bank {
         // Set up the two `LoadedProgramsForTxBatch` instances, as if
         // processing a new transaction batch.
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::new(self.slot);
-        let program_runtime_environments = self
+        let program_runtime_environment = self
             .transaction_processor
-            .get_environments_for_epoch(self.epoch);
+            .program_runtime_environment_for_epoch(self.epoch);
 
         // Configure a dummy `InvokeContext` from the runtime's current
         // environment, as well as the two `ProgramCacheForTxBatch`
@@ -148,7 +148,7 @@ impl Bank {
             let compute_budget = self
                 .compute_budget()
                 .unwrap_or(ComputeBudget::new_with_defaults(
-                    /* simd_0268_active */ false, /* simd_0339_active */ false,
+                    /* simd_0268_active */ false,
                 ));
             let mut sysvar_cache = SysvarCache::default();
             sysvar_cache.fill_missing_entries(|pubkey, set_sysvar| {
@@ -176,8 +176,8 @@ impl Bank {
                     0,
                     &MockCallback {},
                     &feature_set,
-                    &program_runtime_environments,
-                    &program_runtime_environments,
+                    &program_runtime_environment,
+                    &program_runtime_environment,
                     &sysvar_cache,
                 ),
                 None,
@@ -190,7 +190,7 @@ impl Bank {
                 dummy_invoke_context.get_log_collector(),
                 &mut load_program_metrics,
                 dummy_invoke_context.program_cache_for_tx_batch,
-                program_runtime_environments.program_runtime_v1.clone(),
+                program_runtime_environment.clone(),
                 program_id,
                 &bpf_loader_upgradeable::id(),
                 // The size of the program cache entry is the size of the program account
@@ -209,7 +209,7 @@ impl Bank {
             .write()
             .unwrap()
             .merge(
-                &self.transaction_processor.environments,
+                &self.transaction_processor.program_runtime_environment,
                 self.slot,
                 &program_cache_for_tx_batch.drain_modified_entries(),
             );
@@ -528,7 +528,13 @@ pub(crate) mod tests {
         solana_loader_v3_interface::{get_program_data_address, state::UpgradeableLoaderState},
         solana_message::Message,
         solana_native_token::LAMPORTS_PER_SOL,
-        solana_program_runtime::loaded_programs::{ProgramCacheEntry, ProgramCacheEntryType},
+        solana_program_runtime::{
+            loaded_programs::{ProgramCacheEntry, ProgramCacheEntryType},
+            solana_sbpf::{
+                self, memory_region::MemoryMapping, program::BuiltinFunctionDefinition,
+                vm::ContextObject,
+            },
+        },
         solana_pubkey::Pubkey,
         solana_sdk_ids::{bpf_loader, bpf_loader_upgradeable, native_loader, system_program},
         solana_signer::Signer,
@@ -536,6 +542,25 @@ pub(crate) mod tests {
         std::{fs::File, io::Read, sync::Arc},
         test_case::test_case,
     };
+
+    struct NoopBuiltin;
+    impl<C: ContextObject> BuiltinFunctionDefinition<C> for NoopBuiltin {
+        type Error = Box<dyn std::error::Error>;
+        fn rust(
+            _: &mut C,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: &mut MemoryMapping,
+        ) -> Result<u64, Box<dyn std::error::Error>> {
+            Ok(0)
+        }
+
+        fn vm(_: *mut solana_sbpf::vm::EbpfVm<C>, _: u64, _: u64, _: u64, _: u64, _: u64) {}
+        fn codegen(_: &mut solana_sbpf::program::JitCompiler<C>) {}
+    }
 
     fn test_elf() -> Vec<u8> {
         let mut elf = Vec::new();
@@ -730,7 +755,7 @@ pub(crate) mod tests {
                 .global_program_cache
                 .read()
                 .unwrap();
-            let entries = program_cache.get_flattened_entries(true, true);
+            let entries = program_cache.get_flattened_entries();
             let target_entry = entries
                 .iter()
                 .find(|(program_id, _last_modification_slot, _entry)| {
@@ -770,11 +795,7 @@ pub(crate) mod tests {
             bank.add_builtin(
                 builtin_id,
                 builtin_name.as_str(),
-                ProgramCacheEntry::new_builtin(
-                    0,
-                    builtin_name.len(),
-                    |_invoke_context, _param0, _param1, _param2, _param3, _param4| {},
-                ),
+                ProgramCacheEntry::new_builtin(0, builtin_name.len(), NoopBuiltin::register),
             );
             account
         };
@@ -910,11 +931,7 @@ pub(crate) mod tests {
             bank.add_builtin(
                 builtin_id,
                 builtin_name.as_str(),
-                ProgramCacheEntry::new_builtin(
-                    0,
-                    builtin_name.len(),
-                    |_invoke_context, _param0, _param1, _param2, _param3, _param4| {},
-                ),
+                ProgramCacheEntry::new_builtin(0, builtin_name.len(), NoopBuiltin::register),
             );
             account
         };
@@ -964,11 +981,7 @@ pub(crate) mod tests {
             bank.add_builtin(
                 builtin_id,
                 builtin_name.as_str(),
-                ProgramCacheEntry::new_builtin(
-                    0,
-                    builtin_name.len(),
-                    |_invoke_context, _param0, _param1, _param2, _param3, _param4| {},
-                ),
+                ProgramCacheEntry::new_builtin(0, builtin_name.len(), NoopBuiltin::register),
             );
             account
         };
@@ -1018,11 +1031,7 @@ pub(crate) mod tests {
             bank.add_builtin(
                 builtin_id,
                 builtin_name.as_str(),
-                ProgramCacheEntry::new_builtin(
-                    0,
-                    builtin_name.len(),
-                    |_invoke_context, _param0, _param1, _param2, _param3, _param4| {},
-                ),
+                ProgramCacheEntry::new_builtin(0, builtin_name.len(), NoopBuiltin::register),
             );
             account
         };
@@ -1434,7 +1443,11 @@ pub(crate) mod tests {
         root_bank.add_builtin(
             cpi_program_id,
             cpi_program_name,
-            ProgramCacheEntry::new_builtin(0, cpi_program_name.len(), cpi_mockup::Entrypoint::vm),
+            ProgramCacheEntry::new_builtin(
+                0,
+                cpi_program_name.len(),
+                cpi_mockup::Entrypoint::register,
+            ),
         );
 
         let (builtin_id, config) = prototype.deconstruct();
@@ -1485,7 +1498,7 @@ pub(crate) mod tests {
 
         // Add the feature to the bank's inactive feature set.
         let mut feature_set = FeatureSet::all_enabled();
-        feature_set.inactive_mut().insert(*feature_id);
+        feature_set.deactivate(feature_id);
         root_bank.feature_set = Arc::new(feature_set);
 
         // Initialize the source buffer account.
@@ -1570,7 +1583,7 @@ pub(crate) mod tests {
 
         // Set up the feature set with the migration feature marked as active.
         let mut feature_set = FeatureSet::all_enabled();
-        feature_set.active_mut().insert(*feature_id, 0);
+        feature_set.activate(feature_id, 0);
         bank.feature_set = Arc::new(feature_set);
         bank.store_account_and_update_capitalization(
             feature_id,
@@ -1744,7 +1757,7 @@ pub(crate) mod tests {
         // Now, add the feature ID as active, and run `finish_init` again to
         // make sure the feature is idempotent.
         let mut feature_set = FeatureSet::all_enabled();
-        feature_set.active_mut().insert(*feature_id, 0);
+        feature_set.activate(feature_id, 0);
         bank.feature_set = Arc::new(feature_set);
         bank.store_account_and_update_capitalization(
             feature_id,
@@ -1967,7 +1980,11 @@ pub(crate) mod tests {
         root_bank.add_builtin(
             cpi_program_id,
             cpi_program_name,
-            ProgramCacheEntry::new_builtin(0, cpi_program_name.len(), cpi_mockup::Entrypoint::vm),
+            ProgramCacheEntry::new_builtin(
+                0,
+                cpi_program_name.len(),
+                cpi_mockup::Entrypoint::register,
+            ),
         );
 
         // Add the feature to the bank's inactive feature set.
@@ -2017,7 +2034,7 @@ pub(crate) mod tests {
 
         // Add the feature to the bank's inactive feature set.
         let mut feature_set = FeatureSet::all_enabled();
-        feature_set.inactive_mut().insert(*feature_id);
+        feature_set.deactivate(feature_id);
         root_bank.feature_set = Arc::new(feature_set);
 
         // Initialize the source buffer account.
@@ -2172,7 +2189,9 @@ pub(crate) mod tests {
             .unwrap();
 
         program_cache.assign_program(
-            &roundtrip_bank.transaction_processor.environments,
+            &roundtrip_bank
+                .transaction_processor
+                .program_runtime_environment,
             bpf_loader_v2_program_address,
             upgrade_slot,
             entry,
@@ -2216,7 +2235,11 @@ pub(crate) mod tests {
         root_bank.add_builtin(
             cpi_program_id,
             cpi_program_name,
-            ProgramCacheEntry::new_builtin(0, cpi_program_name.len(), cpi_mockup::Entrypoint::vm),
+            ProgramCacheEntry::new_builtin(
+                0,
+                cpi_program_name.len(),
+                cpi_mockup::Entrypoint::register,
+            ),
         );
 
         // Add the feature to the bank's inactive feature set.
@@ -2277,7 +2300,11 @@ pub(crate) mod tests {
         root_bank.add_builtin(
             cpi_program_id,
             cpi_program_name,
-            ProgramCacheEntry::new_builtin(0, cpi_program_name.len(), cpi_mockup::Entrypoint::vm),
+            ProgramCacheEntry::new_builtin(
+                0,
+                cpi_program_name.len(),
+                cpi_mockup::Entrypoint::register,
+            ),
         );
 
         // Add the feature to the bank's inactive feature set.

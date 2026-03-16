@@ -30,7 +30,7 @@ use {
         },
     },
     solana_client::connection_cache::Protocol,
-    solana_clock::{MAX_PROCESSING_AGE, Slot, UnixTimestamp},
+    solana_clock::{Slot, UnixTimestamp},
     solana_commitment_config::{CommitmentConfig, CommitmentLevel},
     solana_entry::entry::Entry,
     solana_epoch_info::EpochInfo,
@@ -42,7 +42,7 @@ use {
     solana_keypair::Keypair,
     solana_ledger::{
         blockstore::{Blockstore, BlockstoreError, SignatureInfosForAddress},
-        blockstore_meta::{PerfSample, PerfSampleV1, PerfSampleV2},
+        blockstore_meta::PerfSample,
         leader_schedule_cache::LeaderScheduleCache,
     },
     solana_message::{AddressLoader, SanitizedMessage},
@@ -121,6 +121,7 @@ use {
     solana_gossip::contact_info::ContactInfo,
     solana_ledger::get_tmp_ledger_path,
     solana_net_utils::SocketAddrSpace,
+    solana_program_runtime::solana_sbpf::program::BuiltinFunctionDefinition,
     solana_runtime::commitment::CommitmentSlots,
     solana_send_transaction_service::{
         send_transaction_service::Config as SendTransactionServiceConfig,
@@ -3837,9 +3838,6 @@ pub mod rpc_full {
                 preflight_bank.get_reserved_account_keys(),
                 preflight_bank
                     .feature_set
-                    .is_active(&agave_feature_set::static_instruction_limit::id()),
-                preflight_bank
-                    .feature_set
                     .is_active(&agave_feature_set::limit_instruction_accounts::id()),
             )?;
             let blockhash = *transaction.message().recent_blockhash();
@@ -3858,7 +3856,8 @@ pub mod rpc_full {
                 // It provides a fallback timeout for durable-nonce transaction retries in case of
                 // malicious packing of the retry queue. Durable-nonce transactions are otherwise
                 // retried until the nonce is advanced.
-                last_valid_block_height = preflight_bank.block_height() + MAX_PROCESSING_AGE as u64;
+                last_valid_block_height =
+                    preflight_bank.block_height() + preflight_bank.max_processing_age() as u64;
             }
 
             if !skip_preflight {
@@ -4001,8 +4000,6 @@ pub mod rpc_full {
                 unsanitized_tx,
                 bank,
                 bank.get_reserved_account_keys(),
-                bank.feature_set
-                    .is_active(&agave_feature_set::static_instruction_limit::id()),
                 bank.feature_set
                     .is_active(&agave_feature_set::limit_instruction_accounts::id()),
             )?;
@@ -4321,30 +4318,12 @@ pub mod rpc_full {
 }
 
 fn rpc_perf_sample_from_perf_sample(slot: u64, sample: PerfSample) -> RpcPerfSample {
-    match sample {
-        PerfSample::V1(PerfSampleV1 {
-            num_transactions,
-            num_slots,
-            sample_period_secs,
-        }) => RpcPerfSample {
-            slot,
-            num_transactions,
-            num_non_vote_transactions: None,
-            num_slots,
-            sample_period_secs,
-        },
-        PerfSample::V2(PerfSampleV2 {
-            num_transactions,
-            num_non_vote_transactions,
-            num_slots,
-            sample_period_secs,
-        }) => RpcPerfSample {
-            slot,
-            num_transactions,
-            num_non_vote_transactions: Some(num_non_vote_transactions),
-            num_slots,
-            sample_period_secs,
-        },
+    RpcPerfSample {
+        slot,
+        num_transactions: sample.num_transactions,
+        num_non_vote_transactions: Some(sample.num_non_vote_transactions),
+        num_slots: sample.num_slots,
+        sample_period_secs: sample.sample_period_secs,
     }
 }
 
@@ -4416,7 +4395,6 @@ fn sanitize_transaction(
     transaction: VersionedTransaction,
     address_loader: impl AddressLoader,
     reserved_account_keys: &HashSet<Pubkey>,
-    enable_static_instruction_limit: bool,
     enable_instruction_accounts_limit: bool,
 ) -> Result<RuntimeTransaction<SanitizedTransaction>> {
     RuntimeTransaction::try_create(
@@ -4425,7 +4403,6 @@ fn sanitize_transaction(
         None,
         address_loader,
         reserved_account_keys,
-        enable_static_instruction_limit,
         enable_instruction_accounts_limit,
     )
     .map_err(|err| Error::invalid_params(format!("invalid transaction: {err}")))
@@ -4551,7 +4528,7 @@ pub mod tests {
         solana_instruction::{AccountMeta, Instruction, error::InstructionError},
         solana_keypair::Keypair,
         solana_ledger::{
-            blockstore_meta::PerfSampleV2,
+            blockstore_meta::PerfSample,
             blockstore_processor::fill_blockstore_slot_with_ticks,
             genesis_utils::{GenesisConfigInfo, create_genesis_config},
             get_tmp_ledger_path,
@@ -4721,14 +4698,14 @@ pub mod tests {
     declare_builtin_function!(
         TestBuiltinEntrypoint,
         fn rust(
-            invoke_context: &mut InvokeContext,
+            invoke_context: &mut InvokeContext<'_, '_>,
             _arg0: u64,
             _arg1: u64,
             _arg2: u64,
             _arg3: u64,
             _arg4: u64,
             _memory_mapping: &mut MemoryMapping,
-        ) -> std::result::Result<u64, Box<dyn std::error::Error>> {
+        ) -> Result<u64, Box<dyn std::error::Error>> {
             test_builtin_processor(invoke_context)
         }
     );
@@ -4740,7 +4717,7 @@ pub mod tests {
             solana_pubkey::pubkey!("TestProgram11111111111111111111111111111111");
 
         fn cache_entry() -> ProgramCacheEntry {
-            ProgramCacheEntry::new_builtin(0, Self::NAME.len(), Self::vm)
+            ProgramCacheEntry::new_builtin(0, Self::NAME.len(), Self::register)
         }
 
         fn instruction(
@@ -5221,7 +5198,7 @@ pub mod tests {
         rpc.blockstore
             .write_perf_sample(
                 slot,
-                &PerfSampleV2 {
+                &PerfSample {
                     num_slots,
                     num_transactions,
                     num_non_vote_transactions,
@@ -9217,7 +9194,6 @@ pub mod tests {
                 SimpleAddressLoader::Disabled,
                 &ReservedAccountKeys::empty_key_set(),
                 true,
-                true,
             )
             .unwrap_err(),
             expect58
@@ -9243,7 +9219,6 @@ pub mod tests {
                 versioned_tx,
                 SimpleAddressLoader::Disabled,
                 &ReservedAccountKeys::empty_key_set(),
-                true,
                 true,
             )
             .unwrap_err(),

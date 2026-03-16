@@ -39,7 +39,7 @@ use {
             UninstalledScheduler, UninstalledSchedulerBox, initialized_result_with_timings,
         },
         prioritization_fee_cache::PrioritizationFeeCache,
-        vote_sender_types::ReplayVoteSender,
+        vote_sender_types::{ReplayVoteSendType, ReplayVoteSender},
     },
     solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
     solana_svm::transaction_processing_result::ProcessedTransaction,
@@ -1283,6 +1283,13 @@ impl TaskHandler for DefaultTaskHandler {
             bank,
             handler_context.transaction_status_sender.as_ref(),
             handler_context.replay_vote_sender.as_ref(),
+            match scheduling_context.mode() {
+                BlockVerification => ReplayVoteSendType::Executed {
+                    replay_bank_id: bank.bank_id(),
+                    replay_slot: bank.slot(),
+                },
+                BlockProduction => ReplayVoteSendType::VerifiedExecuted,
+            },
             timings,
             handler_context.log_messages_bytes_limit,
             handler_context.prioritization_fee_cache.as_deref(),
@@ -2924,7 +2931,7 @@ mod tests {
         super::*,
         crate::sleepless_testing,
         assert_matches::assert_matches,
-        solana_clock::{MAX_PROCESSING_AGE, Slot},
+        solana_clock::Slot,
         solana_hash::Hash,
         solana_keypair::Keypair,
         solana_ledger::blockstore_processor::{TransactionStatusBatch, TransactionStatusMessage},
@@ -4241,7 +4248,7 @@ mod tests {
             bank.slot().checked_add(1).unwrap(),
         ));
         // Immediately trigger WouldExceedMaxBlockCostLimit by setting all cost limits to 0
-        bank.write_cost_tracker().unwrap().set_limits(0, 0, 0);
+        bank.write_cost_tracker().unwrap().set_limits(0, 0, 0, 0);
 
         let context = SchedulingContext::for_production(bank.clone());
         let scheduler = pool.take_scheduler(context).unwrap();
@@ -4268,9 +4275,7 @@ mod tests {
             bank.slot().checked_add(1).unwrap(),
         ));
         // Revert the block cost limit
-        bank.write_cost_tracker()
-            .unwrap()
-            .set_limits(u64::MAX, u64::MAX, u64::MAX);
+        bank.write_cost_tracker().unwrap().set_limits_max();
 
         let context = SchedulingContext::for_production(bank.clone());
         let scheduler = pool.take_scheduler(context).unwrap();
@@ -4537,7 +4542,7 @@ mod tests {
                 genesis_config.hash(),
             ));
         let mut bank = Bank::new_for_tests(&genesis_config);
-        for _ in 0..MAX_PROCESSING_AGE {
+        for _ in 0..bank.max_processing_age() {
             bank.fill_bank_with_ticks_for_tests();
             bank.freeze();
             let slot = bank.slot();

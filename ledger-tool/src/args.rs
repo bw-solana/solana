@@ -4,7 +4,7 @@ use {
     log::*,
     solana_account_decoder::{UiAccountEncoding, UiDataSliceConfig},
     solana_accounts_db::{
-        accounts_db::{AccountShrinkThreshold, AccountsDbConfig, MarkObsoleteAccounts},
+        accounts_db::{AccountShrinkThreshold, AccountsDbConfig},
         accounts_file::StorageAccess,
         accounts_index::{
             AccountsIndexConfig, DEFAULT_NUM_ENTRIES_OVERHEAD, DEFAULT_NUM_ENTRIES_TO_EVICT,
@@ -151,6 +151,15 @@ pub fn accounts_db_args<'a, 'b>() -> Box<[Arg<'a, 'b>]> {
             .takes_value(true)
             .help("The number of ancient storages the ancient slot combining should converge to.")
             .hidden(hidden_unless_forced()),
+        Arg::with_name("no_accounts_db_snapshots_direct_io")
+            .long("no-accounts-db-snapshots-direct-io")
+            .help("Disable direct I/O use for accounts-db snapshot operations")
+            .long_help(
+                "Do *not* use direct I/O for accounts-db file operations related to snapshot \
+                 processsing. Direct I/O can improve performance by bypassing OS page cache, but \
+                 requires the file systems hosting snapshots and accounts-db directories to \
+                 support files opened with the O_DIRECT flag.",
+            ),
     ]
     .into_boxed_slice()
 }
@@ -373,13 +382,12 @@ pub fn get_accounts_db_config(
         partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig::default(),
         storage_access,
         scan_filter_for_shrinking,
-        mark_obsolete_accounts: MarkObsoleteAccounts::default(),
         num_background_threads: None,
         num_foreground_threads: None,
         use_registered_io_uring_buffers: resource_limits::check_memlock_limit_for_disk_io(
             solana_accounts_db::accounts_db::TOTAL_IO_URING_BUFFERS_SIZE_LIMIT,
         ),
-        snapshots_use_direct_io: false,
+        snapshots_use_direct_io: !arg_matches.is_present("no_accounts_db_snapshots_direct_io"),
     }
 }
 

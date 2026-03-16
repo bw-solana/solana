@@ -27,6 +27,8 @@ Release channels have their own copy of this changelog:
 ### RPC
 #### Breaking
 * `--public-tpu-address` and `--public-tpu-forwards-address` CLI arguments and `setPublicTpuForwardsAddress`, `setPublicTpuAddress` RPC methods now specify QUIC ports, not UDP.
+* Blockstore `PerfSamples` column legacy format removed.
+  * The `PerfSamples` column format was updated in agave v1.15 to write `PerfSampleV2`. The old format, `PerfSampleV1`, will no longer be supported for fallback reads as of v4.0.
 #### Changes
 * Added `--enable-scheduler-bindings` which binds an IPC server at `<ledger-path>/scheduler_bindings.ipc` for external schedulers to connect to.
 * Added `clientId` field to each node in `getClusterNodes` response
@@ -37,10 +39,13 @@ Release channels have their own copy of this changelog:
   * `--accounts-db-hash-threads`
   * `--accounts-db-read-cache-limit-mb`
   * `--accounts-hash-cache-path`
+  * `--cuda`
   * `--disable-accounts-disk-index`
   * `--dev-halt-at-slot`
   * `--monitor` (`exit` subcommand)
+  * `--transaction-struct`
   * `--wait-for-exit` (`exit` subcommand)
+  * `--tpu-coalesce-ms`
   * `--tpu-disable-quic`
   * `--tpu-enable-udp`
 * `--block-verification-method blockstore-processor` is no longer supported. Remove the argument or switch to `--block-verification-method unified-scheduler` instead.
@@ -96,6 +101,10 @@ prerelease version. The new interpretation is as follows:
     * { min: 0x4002, patch: 0x0002 } -> X.2.0-rc.2
     * { min: 0x8003, patch: 0x0001 } -> X.3.0-beta.1
     * { min: 0xC004, patch: 0x0000 } -> X.4.0-alpha.0
+* Blockstore `SlotMeta` and `Index` columns legacy format removed.
+  * The `Index` column was updated in v2.2 to write `IndexV2`.
+  * The `SlotMeta` column format was updated in v3.1 to write `SlotMetaV2`.
+  * The old formats, `SlotMetaV1` and `IndexV1`, will no longer be supported for fallback reads as of v4.0
 
 #### Deprecations
 * Using `mmap` for `--accounts-db-access-storages-method` is now deprecated.
@@ -103,6 +112,7 @@ prerelease version. The new interpretation is as follows:
 #### Changes
 * `agave-validator exit` now saves bank state before exiting. This enables restarts from local state when snapshot generation is disabled.
 * Added `--accounts-index-limit` to specify the memory limit of the accounts index.
+* Snapshot archive unpacking now uses direct I/O by default to improve performance by bypassing the OS page cache. Use `--no-accounts-db-snapshots-direct-io` to opt out if your file system does not support `O_DIRECT`. Direct I/O will be extended to snapshot creation in a future release.
 ### CLI
 #### Breaking
 * Removed deprecated arguments

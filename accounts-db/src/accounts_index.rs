@@ -1003,6 +1003,13 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             }
         }
 
+        // If we found an ancestor, then we can return early without checking the roots
+        // If there is a root that is newer than the newest ancestor but not an ancestor
+        // then the root is from a different fork and should not be returned
+        if let Some(rv) = rv {
+            return Some(slot_list.len() - 1 - rv);
+        }
+
         let max_root_inclusive = max_root_inclusive.unwrap_or(Slot::MAX);
         let mut tracker = None;
 
@@ -1966,7 +1973,7 @@ mod tests {
         let pubkey = &key;
         let slot = 0;
         let mut ancestors = Ancestors::default();
-        ancestors.insert(slot, 0);
+        ancestors.insert(slot);
 
         let account_info = true;
         let index = AccountsIndex::<bool, bool>::default_for_tests();
@@ -2005,7 +2012,7 @@ mod tests {
             )
             .expect("scan should succeed");
         assert_eq!(num, 0);
-        ancestors.insert(slot, 0);
+        ancestors.insert(slot);
         assert!(index.contains_with(pubkey, Some(&ancestors), None));
         assert_eq!(index.ref_count_from_storage(pubkey), 1);
         index
@@ -2042,7 +2049,7 @@ mod tests {
             )
             .expect("scan should succeed");
         assert_eq!(num, 0);
-        ancestors.insert(slot, 0);
+        ancestors.insert(slot);
         assert!(index.contains_with(pubkey, Some(&ancestors), None));
         assert_eq!(index.ref_count_from_storage(pubkey), 1);
         index
@@ -2461,7 +2468,7 @@ mod tests {
             )
             .expect("scan should succeed");
         assert_eq!(num, 0);
-        ancestors.insert(slot, 0);
+        ancestors.insert(slot);
         assert!(index.contains_with(&key, Some(&ancestors), None));
         index
             .scan_accounts(
@@ -2491,7 +2498,7 @@ mod tests {
         );
         assert!(gc.is_empty());
 
-        let ancestors = vec![(1, 1)].into_iter().collect();
+        let ancestors = Ancestors::from(vec![1]);
         assert!(!index.contains_with(&key, Some(&ancestors), None));
 
         let mut num = 0;
@@ -2617,7 +2624,7 @@ mod tests {
         );
         assert!(gc.is_empty());
 
-        let ancestors = vec![(0, 0)].into_iter().collect();
+        let ancestors = Ancestors::from(vec![0]);
         index
             .get_with_and_then(
                 &key,
@@ -2776,7 +2783,7 @@ mod tests {
     fn test_update_last_wins() {
         let key = solana_pubkey::new_rand();
         let index = AccountsIndex::<u64, u64>::default_for_tests();
-        let ancestors = vec![(0, 0)].into_iter().collect();
+        let ancestors = Ancestors::from(vec![0]);
         let mut gc = ReclaimsSlotList::new();
         index.upsert(
             0,
@@ -2833,7 +2840,7 @@ mod tests {
         agave_logger::setup();
         let key = solana_pubkey::new_rand();
         let index = AccountsIndex::<bool, bool>::default_for_tests();
-        let ancestors = vec![(0, 0)].into_iter().collect();
+        let ancestors = Ancestors::from(vec![0]);
         let mut gc = ReclaimsSlotList::new();
         index.upsert(
             0,
@@ -2869,7 +2876,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let ancestors = vec![(1, 0)].into_iter().collect();
+        let ancestors = Ancestors::from(vec![1]);
         index
             .get_with_and_then(
                 &key,
@@ -3108,7 +3115,7 @@ mod tests {
 
         // Given a max_root, should filter out roots < max_root, but specified
         // ancestors should not be affected
-        let ancestors = vec![(3, 1), (7, 1)].into_iter().collect();
+        let ancestors = Ancestors::from(vec![3, 7]);
         assert_eq!(
             index
                 .latest_slot(Some(&ancestors), &slot_slice, Some(4))
@@ -3128,6 +3135,15 @@ mod tests {
                 .latest_slot(Some(&ancestors), &slot_slice, None)
                 .unwrap(),
             3
+        );
+
+        // Given ancestors that are *older* than the newest root, should still return ancestors
+        let ancestors = Ancestors::from(vec![3]);
+        assert_eq!(
+            index
+                .latest_slot(Some(&ancestors), &slot_slice, None)
+                .unwrap(),
+            2
         );
     }
 
@@ -3267,7 +3283,7 @@ mod tests {
         }
 
         // Verify that the item added is in in the slot list
-        let ancestors = vec![(reclaim_slot, 0)].into_iter().collect();
+        let ancestors = Ancestors::from(vec![reclaim_slot]);
         index
             .get_with_and_then(
                 &key,
@@ -3282,7 +3298,7 @@ mod tests {
             .unwrap();
 
         // Verify that the newer item remains in the slot list
-        let ancestors = vec![((reclaim_slot + 1), 0)].into_iter().collect();
+        let ancestors = Ancestors::from(vec![reclaim_slot + 1]);
         index
             .get_with_and_then(
                 &key,

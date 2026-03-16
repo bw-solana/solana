@@ -22,7 +22,7 @@ use {
     crossbeam_channel::{RecvTimeoutError, TryRecvError},
     solana_accounts_db::account_locks::validate_account_locks,
     solana_address_lookup_table_interface::state::estimate_last_valid_slot,
-    solana_clock::{Epoch, MAX_PROCESSING_AGE, Slot},
+    solana_clock::{Epoch, Slot},
     solana_cost_model::cost_model::CostModel,
     solana_fee_structure::FeeBudgetLimits,
     solana_message::v0::LoadedAddresses,
@@ -242,9 +242,6 @@ impl TransactionViewReceiveAndBuffer {
         // If outside holding window, do not parse.
         let should_parse = !matches!(decision, BufferedPacketsDecision::Forward);
 
-        let enable_static_instruction_limit = root_bank
-            .feature_set
-            .is_active(&agave_feature_set::static_instruction_limit::ID);
         let enable_instruction_accounts_limit = root_bank
             .feature_set
             .is_active(&agave_feature_set::limit_instruction_accounts::ID);
@@ -275,7 +272,7 @@ impl TransactionViewReceiveAndBuffer {
                     working_bank.check_transactions::<RuntimeTransaction<_>>(
                         &transactions,
                         &lock_results[..transactions.len()],
-                        MAX_PROCESSING_AGE,
+                        working_bank.max_processing_age(),
                         &mut error_counters,
                     )
                 };
@@ -349,7 +346,6 @@ impl TransactionViewReceiveAndBuffer {
                             bytes,
                             root_bank,
                             working_bank,
-                            enable_static_instruction_limit,
                             transaction_account_lock_limit,
                             enable_instruction_accounts_limit,
                         ) {
@@ -410,14 +406,12 @@ impl TransactionViewReceiveAndBuffer {
         bytes: SharedBytes,
         root_bank: &Bank,
         working_bank: &Bank,
-        enable_static_instruction_limit: bool,
         transaction_account_lock_limit: usize,
         enable_instruction_accounts_limit: bool,
     ) -> Result<TransactionViewState, PacketHandlingError> {
         let (view, deactivation_slot) = translate_to_runtime_view(
             bytes,
             root_bank,
-            enable_static_instruction_limit,
             transaction_account_lock_limit,
             enable_instruction_accounts_limit,
         )?;
@@ -443,16 +437,13 @@ impl TransactionViewReceiveAndBuffer {
 pub(crate) fn translate_to_runtime_view<D: TransactionData>(
     data: D,
     bank: &Bank,
-    enable_static_instruction_limit: bool,
     transaction_account_lock_limit: usize,
     enable_instruction_accounts_limit: bool,
 ) -> Result<(RuntimeTransaction<ResolvedTransactionView<D>>, u64), PacketHandlingError> {
     // Parsing and basic sanitization checks
-    let Ok(view) = SanitizedTransactionView::try_new_sanitized(
-        data,
-        enable_static_instruction_limit,
-        enable_instruction_accounts_limit,
-    ) else {
+    let Ok(view) =
+        SanitizedTransactionView::try_new_sanitized(data, enable_instruction_accounts_limit)
+    else {
         return Err(PacketHandlingError::Sanitization);
     };
 

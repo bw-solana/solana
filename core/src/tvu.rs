@@ -6,7 +6,7 @@ use {
         admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
         banking_trace::BankingTracer,
         block_creation_loop::ReplayHighestFrozen,
-        bls_sigverifier,
+        bls_sigverify::bls_sigverifier::{self, SigVerifierChannels, SigVerifierContext},
         cluster_info_vote_listener::{
             DuplicateConfirmedSlotsReceiver, GossipVerifiedVoteHashReceiver,
             VerifiedVoterSlotsReceiver, VerifiedVoterSlotsSender, VoteTracker,
@@ -32,6 +32,7 @@ use {
         voting_service::{VotingService as BLSVotingService, VotingServiceOverride},
         votor::{Votor, VotorConfig},
     },
+    agave_votor_messages::reward_certificate::{BuildRewardCertsRequest, BuildRewardCertsResponse},
     agave_xdp::xdp_retransmitter::XdpSender,
     bytes::Bytes,
     crossbeam_channel::{Receiver, Sender, bounded, unbounded},
@@ -110,6 +111,12 @@ pub struct Tvu {
     bls_sigverify_threads: Option<(JoinHandle<()>, JoinHandle<()>)>,
     votor: Votor,
     commitment_service: AggregateCommitmentService,
+
+    // TODO: these will be used when the block component processor is upstreamed
+    #[allow(dead_code)]
+    reward_certs_receiver: Receiver<BuildRewardCertsResponse>,
+    #[allow(dead_code)]
+    build_reward_certs_sender: Sender<BuildRewardCertsRequest>,
 }
 
 pub struct TvuSockets {
@@ -131,6 +138,7 @@ pub struct TvuConfig {
     pub replay_forks_threads: NonZeroUsize,
     pub replay_transactions_threads: NonZeroUsize,
     pub shred_sigverify_threads: NonZeroUsize,
+    pub bls_sigverify_threads: NonZeroUsize,
     pub xdp_sender: Option<XdpSender>,
 }
 
@@ -145,6 +153,7 @@ impl Default for TvuConfig {
             replay_forks_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             replay_transactions_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             shred_sigverify_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
+            bls_sigverify_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             xdp_sender: None,
         }
     }
@@ -253,10 +262,9 @@ impl Tvu {
         // streamer and sigverify for A2A BLS messages
         let (consensus_message_sender, consensus_message_receiver) =
             bounded(MAX_ALPENGLOW_PACKET_NUM);
+        let (reward_votes_sender, reward_votes_receiver) = bounded(MAX_ALPENGLOW_PACKET_NUM);
         let (consensus_metrics_sender, consensus_metrics_receiver) =
             bounded(MAX_IN_FLIGHT_CONSENSUS_EVENTS);
-        // TODO: once the bls sigverifier is upstreamed, it will need the sender side.
-        let (_reward_votes_sender, reward_votes_receiver) = bounded(MAX_ALPENGLOW_PACKET_NUM);
 
         // The BLS socket is currently only available on Testnet and Development clusters.
         // Closer to release we will enable this for all clusters.
@@ -269,7 +277,7 @@ impl Tvu {
                     thread: bls_streamer_t,
                     key_updater: bls_key_updater,
                 },
-                _banlist,
+                banlist,
             ) = {
                 let quic_server_params = QuicStreamerConfig {
                     num_threads: NonZeroUsize::new(4.min(num_cpus::get())).unwrap(),
@@ -298,19 +306,29 @@ impl Tvu {
 
             // sigverifier
             let sharable_banks = bank_forks.read().unwrap().sharable_banks();
-            let bls_sigverify_t = bls_sigverifier::spawn_service(
+            let bls_sigverifier_t = bls_sigverifier::spawn_service(
                 exit.clone(),
-                bls_packet_receiver,
-                sharable_banks,
-                verified_voter_slots_sender,
-                consensus_message_sender.clone(),
-                migration_status.clone(),
+                SigVerifierContext {
+                    migration_status: migration_status.clone(),
+                    banlist,
+                    sharable_banks,
+                    cluster_info: cluster_info.clone(),
+                    leader_schedule: leader_schedule_cache.clone(),
+                    num_threads: tvu_config.bls_sigverify_threads.get(),
+                },
+                SigVerifierChannels {
+                    packet_receiver: bls_packet_receiver,
+                    channel_to_repair: verified_voter_slots_sender,
+                    channel_to_reward: reward_votes_sender,
+                    channel_to_pool: consensus_message_sender.clone(),
+                    channel_to_metrics: consensus_metrics_sender.clone(),
+                },
             );
 
             let mut key_notifiers = key_notifiers.write().unwrap();
             key_notifiers.add(KeyUpdaterType::Bls, bls_key_updater);
 
-            Some((bls_streamer_t, bls_sigverify_t))
+            Some((bls_streamer_t, bls_sigverifier_t))
         } else {
             None
         };
@@ -435,8 +453,8 @@ impl Tvu {
 
         // TODO: when the block component processor is upstreamed,
         // it will use the unused channels below.
-        let (reward_certs_sender, _reward_certs_receiver) = bounded(MAX_ALPENGLOW_PACKET_NUM);
-        let (_build_reward_certs_receiver, build_reward_certs_receiver) =
+        let (reward_certs_sender, reward_certs_receiver) = bounded(MAX_ALPENGLOW_PACKET_NUM);
+        let (build_reward_certs_sender, build_reward_certs_receiver) =
             bounded(MAX_ALPENGLOW_PACKET_NUM);
         let votor_config = VotorConfig {
             exit: exit.clone(),
@@ -591,6 +609,13 @@ impl Tvu {
             bls_sigverify_threads,
             votor,
             commitment_service,
+            // TODO: these two channels are here temporarily and will be removed when the block
+            // component processor is upstreamed from the Alpenglow repo which will consume them.
+            // We need some place to store them temporarily so that they are not dropped.
+            // Dropping them causes interacting with the other ends in the BlsSigverifier to fail
+            // which causes the sigverifier to exit which resulting in various tests to fail.
+            reward_certs_receiver,
+            build_reward_certs_sender,
         })
     }
 

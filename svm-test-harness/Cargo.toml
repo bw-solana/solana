@@ -17,6 +17,7 @@ required-features = ["fuzz"]
 
 [features]
 agave-unstable-api = []
+dev-context-only-utils = []
 dummy-for-ci-check = ["fuzz"]
 fuzz = [
     "dep:clap",
@@ -26,7 +27,6 @@ fuzz = [
 ]
 
 [dependencies]
-agave-logger = { workspace = true }
 clap = { version = "4.5.2", features = ["derive"], optional = true }
 prost = { workspace = true, optional = true }
 solana-svm-test-harness-fixture = { workspace = true }

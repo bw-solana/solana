@@ -22,12 +22,9 @@ dev-context-only-utils = []
 
 [dependencies]
 agave-xdp = { workspace = true }
-arc-swap = { workspace = true }
 bytes = { workspace = true }
 crossbeam-channel = { workspace = true }
-dashmap = { workspace = true }
 futures = { workspace = true }
-futures-util = { workspace = true }
 histogram = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
@@ -38,19 +35,15 @@ num_cpus = { workspace = true }
 pem = { workspace = true }
 percentage = { workspace = true }
 quinn = { workspace = true }
-quinn-proto = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
 smallvec = { workspace = true }
-socket2 = { workspace = true }
 solana-keypair = { workspace = true }
-solana-measure = { workspace = true }
 solana-metrics = { workspace = true }
 solana-net-utils = { workspace = true }
 solana-packet = { workspace = true }
 solana-perf = { workspace = true }
 solana-pubkey = { workspace = true }
-solana-signature = { workspace = true }
 solana-signer = { workspace = true }
 solana-time-utils = { workspace = true }
 solana-tls-utils = { workspace = true }
@@ -58,13 +51,12 @@ solana-transaction-error = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
-x509-parser = { workspace = true }
 
 [dev-dependencies]
-agave-logger = { workspace = true }
+agave-logger = { path = "../logger", features = ["agave-unstable-api"] }
 anyhow = { workspace = true }
 assert_matches = { workspace = true }
 chrono = { workspace = true, features = ["now"] }
 clap = { version = "4.5.31", features = ["cargo", "derive", "error-context"] }
-solana-net-utils = { workspace = true, features = ["dev-context-only-utils"] }
+solana-net-utils = { path = "../net-utils", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-streamer = { path = ".", features = ["agave-unstable-api", "dev-context-only-utils"] }

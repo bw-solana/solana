@@ -7,8 +7,9 @@ use {
     solana_epoch_schedule::EpochSchedule,
     solana_hash::Hash,
     solana_instruction::{AccountMeta, error::InstructionError},
-    solana_program_runtime::invoke_context::{
-        mock_process_instruction, mock_process_instruction_with_feature_set,
+    solana_program_runtime::{
+        invoke_context::{mock_process_instruction, mock_process_instruction_with_feature_set},
+        solana_sbpf::program::BuiltinFunctionDefinition,
     },
     solana_pubkey::Pubkey,
     solana_rent::Rent,
@@ -179,12 +180,11 @@ fn process_instruction(
 ) -> Vec<AccountSharedData> {
     mock_process_instruction(
         &id(),
-        None,
         instruction_data,
         transaction_accounts,
         instruction_accounts,
         expected_result,
-        Entrypoint::vm,
+        Entrypoint::register,
         |_invoke_context| {},
         |_invoke_context| {},
     )
@@ -200,12 +200,11 @@ fn process_deprecated_instruction(
     deprecated_feature_set.deactivate(&deprecate_legacy_vote_ixs::id());
     mock_process_instruction_with_feature_set(
         &id(),
-        None,
         instruction_data,
         transaction_accounts,
         instruction_accounts,
         expected_result,
-        Entrypoint::vm,
+        Entrypoint::register,
         |_invoke_context| {},
         |_invoke_context| {},
         &deprecated_feature_set.runtime_features(),

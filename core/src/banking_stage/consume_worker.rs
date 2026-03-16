@@ -207,7 +207,7 @@ pub(crate) mod external {
             transaction_data::TransactionData, transaction_view::SanitizedTransactionView,
         },
         solana_account::ReadableAccount,
-        solana_clock::{MAX_PROCESSING_AGE, Slot},
+        solana_clock::Slot,
         solana_cost_model::cost_model::CostModel,
         solana_message::v0::LoadedAddresses,
         solana_pubkey::Pubkey,
@@ -769,9 +769,6 @@ pub(crate) mod external {
             Vec<TxView>,
             &'a mut [CheckResponse],
         ) {
-            let enable_static_instruction_limit = bank
-                .feature_set
-                .is_active(&agave_feature_set::static_instruction_limit::ID);
             let enable_instruction_accounts_limit = bank
                 .feature_set
                 .is_active(&agave_feature_set::limit_instruction_accounts::ID);
@@ -781,7 +778,6 @@ pub(crate) mod external {
                 // Parsing and basic sanitization checks
                 match SanitizedTransactionView::try_new_sanitized(
                     tx_ptr,
-                    enable_static_instruction_limit,
                     enable_instruction_accounts_limit,
                 ) {
                     Ok(view) => {
@@ -923,7 +919,7 @@ pub(crate) mod external {
                 .check_transactions_with_processed_slots(
                     txs,
                     &[const { Ok(()) }; MAX_TRANSACTIONS_PER_MESSAGE],
-                    MAX_PROCESSING_AGE,
+                    working_bank.max_processing_age(),
                     true,
                     &mut error_counters,
                 );
@@ -962,9 +958,6 @@ pub(crate) mod external {
             batch: &TransactionPtrBatch,
             bank: &Bank,
         ) -> (Vec<Result<(), PacketHandlingError>>, Vec<Tx>, Vec<MaxAge>) {
-            let enable_static_instruction_limit = bank
-                .feature_set
-                .is_active(&agave_feature_set::static_instruction_limit::ID);
             let enable_instruction_accounts_limit = bank
                 .feature_set
                 .is_active(&agave_feature_set::limit_instruction_accounts::ID);
@@ -977,7 +970,6 @@ pub(crate) mod external {
                 match Self::translate_transaction(
                     transaction_ptr,
                     bank,
-                    enable_static_instruction_limit,
                     transaction_account_lock_limit,
                     enable_instruction_accounts_limit,
                 ) {
@@ -996,14 +988,12 @@ pub(crate) mod external {
         fn translate_transaction(
             transaction_ptr: TransactionPtr,
             bank: &Bank,
-            enable_static_instruction_limit: bool,
             transaction_account_lock_limit: usize,
             enable_instruction_accounts_limit: bool,
         ) -> Result<(Tx, MaxAge), PacketHandlingError> {
             translate_to_runtime_view(
                 transaction_ptr,
                 bank,
-                enable_static_instruction_limit,
                 transaction_account_lock_limit,
                 enable_instruction_accounts_limit,
             )
@@ -1187,7 +1177,6 @@ pub(crate) mod external {
                     translate_to_runtime_view(
                         &simple_tx[..],
                         &bank,
-                        true,
                         bank.get_transaction_account_lock_limit(),
                         true,
                     )
@@ -1377,8 +1366,8 @@ pub(crate) mod external {
 
             let parsing_results = [Ok(()), Err(TransactionViewError::ParseError), Ok(())];
             let parsed_transactions = [
-                SanitizedTransactionView::try_new_sanitized(&tx1[..], true, true).unwrap(),
-                SanitizedTransactionView::try_new_sanitized(&tx2[..], true, true).unwrap(),
+                SanitizedTransactionView::try_new_sanitized(&tx1[..], true).unwrap(),
+                SanitizedTransactionView::try_new_sanitized(&tx2[..], true).unwrap(),
             ];
             bank.store_account(
                 &parsed_transactions[1].static_account_keys()[0],
@@ -1428,7 +1417,7 @@ pub(crate) mod external {
             ) -> RuntimeTransaction<ResolvedTransactionView<&'_ [u8]>> {
                 RuntimeTransaction::<ResolvedTransactionView<_>>::try_new(
                     RuntimeTransaction::<SanitizedTransactionView<_>>::try_new(
-                        SanitizedTransactionView::try_new_sanitized(tx, true, true).unwrap(),
+                        SanitizedTransactionView::try_new_sanitized(tx, true).unwrap(),
                         solana_transaction::sanitized::MessageHash::Compute,
                         Some(false),
                     )
@@ -1886,8 +1875,8 @@ impl Default for ConsumeWorkerCountMetrics {
 
 impl ConsumeWorkerCountMetrics {
     fn report_and_reset(&self, id: &str) {
-        datapoint_info!(
-            "banking_stage_worker_counts",
+        let datapoint = create_datapoint!(
+            @point "banking_stage_worker_counts",
             "id" => id,
             ("max_queue_len", self.max_queue_len.swap(0, Ordering::Relaxed), i64),
             (
@@ -1940,6 +1929,7 @@ impl ConsumeWorkerCountMetrics {
                 i64
             ),
         );
+        solana_metrics::submit(datapoint, log::Level::Trace);
     }
 }
 
@@ -1958,8 +1948,8 @@ struct ConsumeWorkerTimingMetrics {
 
 impl ConsumeWorkerTimingMetrics {
     fn report_and_reset(&self, id: &str) {
-        datapoint_info!(
-            "banking_stage_worker_timing",
+        let datapoint = create_datapoint!(
+            @point "banking_stage_worker_timing",
             "id" => id,
             (
                 "cost_model_us",
@@ -1999,6 +1989,7 @@ impl ConsumeWorkerTimingMetrics {
                 i64
             ),
         );
+        solana_metrics::submit(datapoint, log::Level::Trace);
     }
 }
 
@@ -2032,8 +2023,8 @@ struct ConsumeWorkerTransactionErrorMetrics {
 
 impl ConsumeWorkerTransactionErrorMetrics {
     fn report_and_reset(&self, id: &str) {
-        datapoint_info!(
-            "banking_stage_worker_error_metrics",
+        let datapoint = create_datapoint!(
+            @point "banking_stage_worker_error_metrics",
             "id" => id,
             ("total", self.total.swap(0, Ordering::Relaxed), i64),
             (
@@ -2143,6 +2134,7 @@ impl ConsumeWorkerTransactionErrorMetrics {
                 i64
             ),
         );
+        solana_metrics::submit(datapoint, log::Level::Trace);
     }
 }
 
@@ -2157,7 +2149,7 @@ mod tests {
             tests::{create_slow_genesis_config, sanitize_transactions},
         },
         crossbeam_channel::unbounded,
-        solana_clock::{MAX_PROCESSING_AGE, Slot},
+        solana_clock::Slot,
         solana_genesis_config::GenesisConfig,
         solana_keypair::Keypair,
         solana_ledger::genesis_utils::GenesisConfigInfo,
@@ -2577,8 +2569,6 @@ mod tests {
                 loader,
                 &HashSet::default(),
                 bank.feature_set
-                    .is_active(&agave_feature_set::static_instruction_limit::id()),
-                bank.feature_set
                     .is_active(&agave_feature_set::limit_instruction_accounts::id()),
             )
             .unwrap()
@@ -2648,7 +2638,7 @@ mod tests {
             .check_transactions(
                 &sanitized_txs,
                 &vec![Ok(()); sanitized_txs.len()],
-                MAX_PROCESSING_AGE,
+                bank.max_processing_age(),
                 &mut TransactionErrorMetrics::default(),
             )
             .into_iter()

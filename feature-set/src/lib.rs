@@ -37,16 +37,8 @@ impl FeatureSet {
         &self.active
     }
 
-    pub fn active_mut(&mut self) -> &mut AHashMap<Pubkey, u64> {
-        &mut self.active
-    }
-
     pub fn inactive(&self) -> &AHashSet<Pubkey> {
         &self.inactive
-    }
-
-    pub fn inactive_mut(&mut self) -> &mut AHashSet<Pubkey> {
-        &mut self.inactive
     }
 
     pub fn is_active(&self, feature_id: &Pubkey) -> bool {
@@ -117,8 +109,6 @@ impl FeatureSet {
             abort_on_invalid_curve: self.is_active(&abort_on_invalid_curve::id()),
             blake3_syscall_enabled: self.is_active(&blake3_syscall_enabled::id()),
             curve25519_syscall_enabled: self.is_active(&curve25519_syscall_enabled::id()),
-            disable_deploy_of_alloc_free_syscall: self
-                .is_active(&disable_deploy_of_alloc_free_syscall::id()),
             disable_fees_sysvar: self.is_active(&disable_fees_sysvar::id()),
             disable_sbpf_v0_execution: self.is_active(&disable_sbpf_v0_execution::id()),
             enable_alt_bn128_compression_syscall: self
@@ -1259,7 +1249,7 @@ pub mod custom_commission_collector {
 }
 
 pub mod enable_bls12_381_syscall {
-    solana_pubkey::declare_id!("b1sraWPVFdcUizB2LV5wQTeMuK8M313bi5bHjco5eVU");
+    solana_pubkey::declare_id!("b1sgUiJ3qu7hYm3tNDyyqZNQd6gLGJmJppnLNa93PCQ");
 }
 
 // SIMD-0437 feature gates
