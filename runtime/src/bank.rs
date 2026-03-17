@@ -1600,6 +1600,7 @@ impl Bank {
                 .transaction_processor
                 .program_runtime_environment
                 .clone();
+            // Here we actually want to compare the content of the environments, thus the deref.
             let changed_program_runtime_environment = *upcoming_environment != *new_environment;
             if changed_program_runtime_environment {
                 upcoming_environment = new_environment;
@@ -4455,15 +4456,13 @@ impl Bank {
             .as_ref()
             .unwrap_or(&ComputeBudget::new_with_defaults(simd_0268_active))
             .to_budget();
-        Arc::new(
-            create_program_runtime_environment(
-                &feature_set.runtime_features(),
-                &compute_budget,
-                false, /* deployment */
-                false, /* debugging_features */
-            )
-            .unwrap(),
+        create_program_runtime_environment(
+            &feature_set.runtime_features(),
+            &compute_budget,
+            false, /* deployment */
+            false, /* debugging_features */
         )
+        .unwrap()
     }
 
     pub fn set_tick_height(&self, tick_height: u64) {
