@@ -4776,11 +4776,15 @@ impl Blockstore {
 
     #[cfg(feature = "dev-context-only-utils")]
     pub fn insert_simple_slot_with_meta(&self, slot: Slot, parent_slot: Slot) {
-        let entries = create_ticks(42, 1, Hash::new_unique());
+        // Use an arbitrary tick count sufficient to produce shreds for a complete slot.
+        let num_ticks = 42;
+        let entries = create_ticks(num_ticks, 1, Hash::new_unique());
         let shreds = entries_to_test_shreds(&entries, slot, parent_slot, true, 0);
         let num_shreds = shreds.len() as u64;
         self.insert_shreds(shreds, None, false).unwrap();
-        let mut meta = SlotMeta::new(slot, Some(0));
+        // Update the meta written by insert_shreds rather than overwriting from scratch,
+        // so that chaining/connection info is preserved.
+        let mut meta = self.meta(slot).unwrap().unwrap();
         meta.consumed = num_shreds;
         meta.received = num_shreds;
         meta.last_index = Some(num_shreds - 1);
