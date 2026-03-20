@@ -2195,14 +2195,7 @@ declare_builtin_function!(
                 )
             }
             ALT_BN128_PAIRING_BE => {
-                let version = if invoke_context
-                    .get_feature_set()
-                    .fix_alt_bn128_pairing_length_check {
-                    VersionedPairing::V1
-                } else {
-                    VersionedPairing::V0
-                };
-                alt_bn128_versioned_pairing(version, input, Endianness::BE)
+                alt_bn128_versioned_pairing(VersionedPairing::V1, input, Endianness::BE)
             }
             ALT_BN128_PAIRING_LE => {
                 alt_bn128_versioned_pairing(VersionedPairing::V1, input, Endianness::LE)
@@ -6014,14 +6007,14 @@ mod tests {
 
         with_mock_invoke_context!(invoke_context, transaction_context, vec![]);
         let feature_set = SVMFeatureSet::default();
-        let program_runtime_environment = get_mock_program_runtime_environment();
+        let program_runtime_environments = ProgramRuntimeEnvironments::mock();
         invoke_context.environment_config = EnvironmentConfig::new(
             Hash::default(),
             0,
+            false,
             &MockCallback {},
             &feature_set,
-            &program_runtime_environment,
-            &program_runtime_environment,
+            &program_runtime_environments,
             &sysvar_cache,
         );
         invoke_context.mock_set_remaining(compute_budget.compute_unit_limit);
@@ -6080,14 +6073,14 @@ mod tests {
 
         with_mock_invoke_context!(invoke_context, transaction_context, vec![]);
         let feature_set = SVMFeatureSet::default();
-        let program_runtime_environment = get_mock_program_runtime_environment();
+        let program_runtime_environments = ProgramRuntimeEnvironments::mock();
         invoke_context.environment_config = EnvironmentConfig::new(
             Hash::default(),
             0,
+            false,
             &MockCallback {},
             &feature_set,
-            &program_runtime_environment,
-            &program_runtime_environment,
+            &program_runtime_environments,
             &sysvar_cache,
         );
 

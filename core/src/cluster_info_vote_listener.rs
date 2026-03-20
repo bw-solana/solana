@@ -965,6 +965,7 @@ mod tests {
         itertools::Itertools,
         solana_hash::Hash,
         solana_keypair::Keypair,
+        solana_leader_schedule::SlotLeader,
         solana_perf::{packet, sigverify},
         solana_pubkey::Pubkey,
         solana_rpc::optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
@@ -1038,7 +1039,7 @@ mod tests {
                 .unwrap()
                 .contains_key(&bank.slot())
         );
-        let bank1 = Bank::new_from_parent(bank.clone(), &Pubkey::default(), bank.slot() + 1);
+        let bank1 = Bank::new_from_parent(bank.clone(), SlotLeader::default(), bank.slot() + 1);
         vote_tracker.progress_with_new_root_bank(&bank1);
         assert!(
             !vote_tracker
@@ -1054,7 +1055,7 @@ mod tests {
         let new_epoch_slot = bank
             .epoch_schedule()
             .get_first_slot_in_epoch(current_epoch + 1);
-        let new_epoch_bank = Bank::new_from_parent(bank, &Pubkey::default(), new_epoch_slot);
+        let new_epoch_bank = Bank::new_from_parent(bank, SlotLeader::default(), new_epoch_slot);
         vote_tracker.progress_with_new_root_bank(&new_epoch_bank);
     }
 
@@ -1107,7 +1108,7 @@ mod tests {
         // Votes for slots less than the provided root bank's slot should not be processed
         let bank3 = Arc::new(Bank::new_from_parent(
             Arc::new(bank0),
-            &Pubkey::default(),
+            SlotLeader::default(),
             3,
         ));
         let vote_slots = vec![1, 2];
@@ -1882,7 +1883,7 @@ mod tests {
             .collect();
 
         let new_root_bank =
-            Bank::new_from_parent(bank, &Pubkey::default(), first_slot_in_new_epoch - 2);
+            Bank::new_from_parent(bank, SlotLeader::default(), first_slot_in_new_epoch - 2);
         let notifiers = ConfirmationNotifiers {
             gossip_verified_vote_hash_sender: gossip_verified_vote_hash_sender.clone(),
             verified_voter_slots_sender: verified_voter_slots_sender.clone(),

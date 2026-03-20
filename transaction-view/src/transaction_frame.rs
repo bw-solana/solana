@@ -7,6 +7,7 @@ use {
         result::{Result, TransactionViewError},
         signature_frame::SignatureFrame,
         static_account_keys_frame::StaticAccountKeysFrame,
+        transaction_config_frame::TransactionConfigFrame,
         transaction_version::TransactionVersion,
     },
     solana_hash::Hash,
@@ -28,12 +29,19 @@ pub(crate) struct TransactionFrame {
     instructions: InstructionsFrame,
     /// Address table lookup framing data.
     address_table_lookup: AddressTableLookupFrame,
+    /// Transaction config framing data
+    transaction_config_frame: TransactionConfigFrame,
 }
 
 impl TransactionFrame {
     /// Parse a serialized transaction and verify basic structure.
     /// The `bytes` parameter must have no trailing data.
     pub(crate) fn try_new(bytes: &[u8]) -> Result<Self> {
+        assert!(matches!(
+            Self::is_wire_transaction_legacy_or_v0(bytes),
+            Ok(true) | Err(_)
+        ));
+
         let mut offset = 0;
         let signature = SignatureFrame::try_new(bytes, &mut offset)?;
         let message_header = MessageHeaderFrame::try_new(bytes, &mut offset)?;
@@ -68,7 +76,19 @@ impl TransactionFrame {
             recent_blockhash_offset,
             instructions,
             address_table_lookup,
+            transaction_config_frame: TransactionConfigFrame::not_applicable(),
         })
+    }
+
+    fn is_wire_transaction_legacy_or_v0(bytes: &[u8]) -> Result<bool> {
+        let first_byte = *bytes.first().ok_or(TransactionViewError::ParseError)?;
+
+        // In wire format:
+        // - Legacy/v0 transactions start with signatures (compact-u16 count).
+        //   Packet size limits keep the signature count well below 128, so the
+        //   first byte never has MSB set.
+        // - v1 transactions start with a version byte with MSB = 1.
+        Ok((first_byte & solana_message::MESSAGE_VERSION_PREFIX) == 0)
     }
 
     /// Return the number of signatures in the transaction.
@@ -135,6 +155,12 @@ impl TransactionFrame {
     #[inline]
     pub(crate) fn message_offset(&self) -> u16 {
         self.message_header.offset
+    }
+
+    /// Return transaction_config_frame
+    #[inline]
+    pub(crate) fn transaction_config_frame(&self) -> &TransactionConfigFrame {
+        &self.transaction_config_frame
     }
 }
 
@@ -469,8 +495,9 @@ mod tests {
     fn test_signature_overflow() {
         let tx = simple_transfer();
         let mut bytes = bincode::serialize(&tx).unwrap();
-        // Set the number of signatures to u16::MAX
-        bytes[0] = 0xff;
+        // Set the number of signatures to u16::MAX except the MSB of
+        // first byte, which is the version bit.
+        bytes[0] = 0x7f;
         bytes[1] = 0xff;
         bytes[2] = 0xff;
         assert!(TransactionFrame::try_new(&bytes).is_err());
@@ -670,5 +697,38 @@ mod tests {
 
             assert!(iter.next().is_none());
         }
+    }
+
+    #[test]
+    fn test_is_wire_transaction_legacy_or_v0_errors_on_empty_bytes() {
+        let bytes = [];
+        assert_eq!(
+            TransactionFrame::is_wire_transaction_legacy_or_v0(&bytes),
+            Err(TransactionViewError::ParseError)
+        );
+    }
+
+    #[test]
+    fn test_is_wire_transaction_legacy_or_v0_true_when_first_byte_has_no_version_prefix() {
+        assert!(TransactionFrame::is_wire_transaction_legacy_or_v0(&[0x00]).unwrap());
+        assert!(TransactionFrame::is_wire_transaction_legacy_or_v0(&[0x01]).unwrap());
+        assert!(TransactionFrame::is_wire_transaction_legacy_or_v0(&[0x7f]).unwrap());
+    }
+
+    #[test]
+    fn test_is_wire_transaction_legacy_or_v0_false_when_first_byte_has_version_prefix() {
+        assert!(
+            !TransactionFrame::is_wire_transaction_legacy_or_v0(&[
+                solana_message::MESSAGE_VERSION_PREFIX
+            ])
+            .unwrap()
+        );
+        assert!(
+            !TransactionFrame::is_wire_transaction_legacy_or_v0(&[
+                solana_message::MESSAGE_VERSION_PREFIX | 1
+            ])
+            .unwrap()
+        );
+        assert!(!TransactionFrame::is_wire_transaction_legacy_or_v0(&[0xff]).unwrap());
     }
 }

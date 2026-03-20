@@ -22,8 +22,11 @@ use {
     solana_native_token::LAMPORTS_PER_SOL,
     solana_nonce::{self as nonce, state::DurableNonce},
     solana_program_entrypoint::MAX_PERMITTED_DATA_INCREASE,
-    solana_program_runtime::execution_budget::{
-        MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES, SVMTransactionExecutionAndFeeBudgetLimits,
+    solana_program_runtime::{
+        execution_budget::{
+            MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES, SVMTransactionExecutionAndFeeBudgetLimits,
+        },
+        loaded_programs::ProgramRuntimeEnvironments,
     },
     solana_pubkey::Pubkey,
     solana_sdk_ids::{bpf_loader_upgradeable, compute_budget, native_loader},
@@ -161,12 +164,13 @@ impl SvmTestEnvironment<'_> {
         let processing_environment = TransactionProcessingEnvironment {
             blockhash: LAST_BLOCKHASH,
             blockhash_lamports_per_signature: LAMPORTS_PER_SIGNATURE,
+            alpenglow_migration_succeeded: false,
             epoch_total_stake: 0,
             feature_set: test_entry.feature_set,
-            program_runtime_environment_for_execution: batch_processor
-                .program_runtime_environment_for_epoch(EXECUTION_EPOCH),
-            program_runtime_environment_for_deployment: batch_processor
-                .program_runtime_environment_for_epoch(EXECUTION_EPOCH),
+            program_runtime_environments: ProgramRuntimeEnvironments::new(
+                batch_processor.program_runtime_environment_for_epoch(EXECUTION_EPOCH),
+                batch_processor.program_runtime_environment_for_epoch(EXECUTION_EPOCH),
+            ),
             rent: test_entry.rent.clone(),
         };
 
