@@ -794,6 +794,7 @@ where
     let slot = match layout::get_slot(shred) {
         Some(slot) => {
             if slot > max_slot {
+                error!("#BW: discarding shred with slot {slot} higher than max_slot {max_slot}");
                 stats.slot_out_of_range += 1;
                 return true;
             }
@@ -820,6 +821,7 @@ where
                 return true;
             }
             if slot <= root {
+                error!("#BW: discarding coding shred with slot {slot} <= {root}");
                 stats.slot_out_of_range += 1;
                 return true;
             }
@@ -848,6 +850,9 @@ where
                 return true;
             };
             if !blockstore::verify_shred_slots(slot, parent, root) {
+                error!(
+                    "#BW: discarding data shred with (root,parent,slot) = ({root},{parent},{slot})"
+                );
                 stats.slot_out_of_range += 1;
                 return true;
             }
