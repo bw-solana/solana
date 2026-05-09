@@ -47,6 +47,24 @@ mod stats;
 /// in the form of (block, parent block)
 pub(crate) type PendingBlocks = BTreeMap<Slot, Vec<(Block, Block)>>;
 
+// TEMPORARY TEST HOOK: force selected leader windows down the skip path so
+// fast leader handover can exercise the sad UpdateParent path.
+const FLH_SAD_PATH_SUPPRESS_VOTE_WINDOW_MODULUS: Slot = 128;
+const FLH_SAD_PATH_SKIP_VOTE_DELAY_MS: u64 = 700;
+const FLH_SAD_PATH_PRODUCE_WINDOW_DELAY_MS: u64 = 0;
+
+fn suppress_notar_votes_for_flh_sad_path(slot: Slot) -> bool {
+    let window_start = first_of_consecutive_leader_slots(slot);
+    window_start != 0 && window_start % FLH_SAD_PATH_SUPPRESS_VOTE_WINDOW_MODULUS == 0
+}
+
+fn delay_produce_window_for_flh_sad_path(slot: Slot) -> bool {
+    FLH_SAD_PATH_PRODUCE_WINDOW_DELAY_MS != 0
+        && slot == first_of_consecutive_leader_slots(slot)
+        && slot != 0
+        && suppress_notar_votes_for_flh_sad_path(slot.saturating_sub(1))
+}
+
 /// Inputs for the event handler thread
 pub(crate) struct EventHandlerContext {
     pub(crate) exit: Arc<AtomicBool>,
@@ -381,6 +399,13 @@ impl EventHandler {
             VotorEvent::SafeToNotar(block @ (slot, block_id)) => {
                 info!("{my_pubkey}: SafeToNotar {block:?}");
                 Self::try_skip_window(my_pubkey, slot, vctx, &mut votes)?;
+                if suppress_notar_votes_for_flh_sad_path(slot) {
+                    warn!(
+                        "{my_pubkey}: TEMP TEST HOOK suppressing notarize-fallback vote for slot \
+                         {slot} block {block_id}"
+                    );
+                    return Ok(votes);
+                }
                 if vctx.vote_history.its_over(slot)
                     || vctx.vote_history.voted_notar_fallback(slot, block_id)
                 {
@@ -414,6 +439,14 @@ impl EventHandler {
             // It is time to produce our leader window
             VotorEvent::ProduceWindow(window_info) => {
                 info!("{my_pubkey}: ProduceWindow {window_info:?}");
+                if delay_produce_window_for_flh_sad_path(window_info.start_slot) {
+                    warn!(
+                        "{my_pubkey}: TEMP TEST HOOK delaying ProduceWindow for slot {} by \
+                         {FLH_SAD_PATH_PRODUCE_WINDOW_DELAY_MS}ms",
+                        window_info.start_slot
+                    );
+                    thread::sleep(Duration::from_millis(FLH_SAD_PATH_PRODUCE_WINDOW_DELAY_MS));
+                }
                 ctx.leader_window_info_sender.send(window_info).unwrap();
             }
 
@@ -636,6 +669,14 @@ impl EventHandler {
             return Ok(false);
         }
 
+        if suppress_notar_votes_for_flh_sad_path(slot) {
+            warn!(
+                "{my_pubkey}: TEMP TEST HOOK suppressing notarize vote for slot {slot} block \
+                 {block_id}"
+            );
+            return Ok(false);
+        }
+
         if leader_slot_index(slot) == 0 || slot == 1 {
             if !voting_context
                 .vote_history
@@ -754,7 +795,17 @@ impl EventHandler {
         let start = first_of_consecutive_leader_slots(slot)
             .max(root_bank.slot())
             .max(1);
-        for s in start..=last_of_consecutive_leader_slots(slot) {
+        let end = last_of_consecutive_leader_slots(slot);
+        if suppress_notar_votes_for_flh_sad_path(slot)
+            && (start..=end).any(|s| !voting_context.vote_history.voted(s))
+        {
+            warn!(
+                "{my_pubkey}: TEMP TEST HOOK delaying skip votes for window {start}-{end} by \
+                 {FLH_SAD_PATH_SKIP_VOTE_DELAY_MS}ms"
+            );
+            thread::sleep(Duration::from_millis(FLH_SAD_PATH_SKIP_VOTE_DELAY_MS));
+        }
+        for s in start..=end {
             if voting_context.vote_history.voted(s) {
                 continue;
             }
