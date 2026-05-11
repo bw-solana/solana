@@ -926,6 +926,7 @@ impl Validator {
         .map_err(ValidatorError::Other)?;
 
         let migration_status = bank_forks.read().unwrap().migration_status();
+        blockstore.configure_block_markers_for_migration(&migration_status);
 
         if !config.no_poh_speed_test {
             check_poh_speed(&bank_forks.read().unwrap().root_bank(), None)?;

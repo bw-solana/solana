@@ -736,6 +736,7 @@ impl ReplayStage {
         // Start the replay stage loop
         let run_replay = move || {
             let _exit = Finalizer::new(exit.clone());
+            blockstore.configure_block_markers_for_migration(&migration_status);
 
             if my_pubkey != tower.node_pubkey {
                 // set-identity was called during the startup procedure, ensure the tower is consistent
@@ -1519,6 +1520,7 @@ impl ReplayStage {
         }
 
         migration_status.enable_alpenglow(exit);
+        blockstore.configure_block_markers_for_migration(migration_status);
 
         assert!(migration_status.is_alpenglow_enabled());
         datapoint_info!(
@@ -2780,6 +2782,7 @@ impl ReplayStage {
                     .activated_slot(&agave_feature_set::alpenglow::id())
                 {
                     let migration_slot = migration_status.record_feature_activation(slot);
+                    blockstore.configure_block_markers_for_migration(migration_status);
                     datapoint_info!(
                         "migration-started",
                         ("migration_slot", migration_slot as i64, i64),

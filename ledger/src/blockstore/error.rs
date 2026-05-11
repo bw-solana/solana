@@ -81,6 +81,11 @@ pub enum BlockstoreError {
     UpdateParentMatchesBlockHeader(Slot),
     #[error("update parent slot greater than block header for slot {0}")]
     UpdateParentSlotGreaterThanBlockHeader(Slot),
+    #[error("invalid parent block id for genesis parent in slot {slot}: {parent_block_id}")]
+    InvalidGenesisParentBlockId {
+        slot: Slot,
+        parent_block_id: solana_hash::Hash,
+    },
     #[error("unexpected block component")]
     UnexpectedBlockComponent,
     #[error("multiple update parents for slot {0}")]

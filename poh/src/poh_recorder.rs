@@ -321,7 +321,11 @@ impl PohRecorder {
         self.leader_last_tick_height = leader_last_tick_height;
     }
 
-    /// Send the block marker to be broadcast
+    /// Send a block marker into the current working bank's broadcast stream.
+    ///
+    /// This returns an error rather than panicking so leader control code can
+    /// recover when PoH has already moved on or the broadcast receiver has gone
+    /// away.
     pub fn send_marker(&mut self, marker: VersionedBlockMarker) -> Result<()> {
         let tick_height = self.tick_height();
         let working_bank = self
@@ -334,7 +338,7 @@ impl PohRecorder {
                 working_bank.bank.clone(),
                 (EntryOrMarker::Marker(marker), tick_height),
             ))
-            .unwrap();
+            .map_err(Box::new)?;
 
         Ok(())
     }
@@ -1364,6 +1368,40 @@ mod tests {
         assert!(poh_recorder.working_bank.is_some());
         poh_recorder.clear_bank(true);
         assert!(poh_recorder.working_bank.is_none());
+    }
+
+    #[test]
+    fn test_send_marker_error() {
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Blockstore::open(ledger_path.path())
+            .expect("Expected to be able to open database ledger");
+        let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(2);
+        let bank = Arc::new(Bank::new_for_tests(&genesis_config));
+        let prev_hash = bank.last_blockhash();
+        let (mut poh_recorder, entry_receiver) = PohRecorder::new(
+            0,
+            prev_hash,
+            bank.clone(),
+            Some((4, 4)),
+            bank.ticks_per_slot(),
+            Arc::new(blockstore),
+            &Arc::new(LeaderScheduleCache::new_from_bank(&bank)),
+            &PohConfig::default(),
+            Arc::new(AtomicBool::default()),
+        );
+        poh_recorder.set_bank_for_test(bank);
+        drop(entry_receiver);
+
+        let marker = VersionedBlockMarker::new_block_footer(BlockFooterV1 {
+            bank_hash: Hash::new_unique(),
+            block_producer_time_nanos: 0,
+            block_user_agent: vec![],
+            final_cert: None,
+            skip_reward_cert: None,
+            notar_reward_cert: None,
+        });
+        let err = poh_recorder.send_marker(marker).unwrap_err();
+        assert!(matches!(err, PohRecorderError::SendError(_)));
     }
 
     #[test]

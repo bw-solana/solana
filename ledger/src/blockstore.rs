@@ -272,6 +272,10 @@ pub struct Blockstore {
     perf_samples_cf: LedgerColumn<cf::PerfSamples>,
 
     max_root: AtomicU64,
+    block_markers_enabled: AtomicBool,
+    // First slot where `UpdateParent` may update parent metadata. Headers can be
+    // parsed earlier during migration, but `UpdateParent` is Alpenglow-only.
+    update_parent_enabled_from_slot: AtomicU64,
     insert_shreds_lock: Mutex<()>,
     new_shreds_signals: Mutex<Vec<Sender<bool>>>,
     completed_slots_senders: Mutex<Vec<CompletedSlotsSender>>,
@@ -473,6 +477,16 @@ impl ParentInfo {
             });
         }
 
+        // Genesis does not have a block id. Every path that derives a parent
+        // block id from the genesis bank represents it as the default hash, so
+        // persisted parent metadata must use the same canonical value.
+        if self.parent_slot == 0 && self.parent_block_id != Hash::default() {
+            return Err(BlockstoreError::InvalidGenesisParentBlockId {
+                slot,
+                parent_block_id: self.parent_block_id,
+            });
+        }
+
         if self.populated_from_block_header() && self.parent_slot != shred_parent_slot {
             return Err(BlockstoreError::BlockHeaderParentMismatch {
                 slot,
@@ -594,6 +608,10 @@ impl Blockstore {
             completed_slots_senders: Mutex::default(),
             insert_shreds_lock: Mutex::<()>::default(),
             max_root,
+            // Preserve the legacy behavior for standalone Blockstore callers.
+            // Validator/replay startup configures this from MigrationStatus.
+            block_markers_enabled: AtomicBool::new(true),
+            update_parent_enabled_from_slot: AtomicU64::new(0),
             lowest_cleanup_slot: RwLock::<Slot>::default(),
             manual_purge_request_sender: Mutex::default(),
             slots_stats: SlotsStats::default(),
@@ -956,8 +974,10 @@ impl Blockstore {
     }
 
     /// Gets the double merkle root for the block in the given location.
-    /// Returns `None` if the block is not full.
-    /// DoubleMerkleMeta is computed atomically during shred insertion when a slot becomes full.
+    ///
+    /// Returns `None` if the block is not full, or if the slot was completed
+    /// while block markers were disabled. That can happen for legacy Tower
+    /// slots in a process that later enters Alpenglow migration.
     pub fn get_double_merkle_root(
         &self,
         slot: Slot,
@@ -966,11 +986,6 @@ impl Blockstore {
         let Some(double_merkle_meta_bytes) =
             self.double_merkle_meta_cf.get_slice((slot, location))?
         else {
-            debug_assert!(
-                self.meta_from_location(slot, location)
-                    .unwrap()
-                    .is_none_or(|meta| !meta.is_full())
-            );
             return Ok(None);
         };
 
@@ -1005,6 +1020,10 @@ impl Blockstore {
         location: BlockLocation,
         just_inserted_shreds: &HashMap<(BlockLocation, ShredId), Cow<'_, Shred>>,
     ) -> Option<ParentInfo> {
+        if !self.update_parent_enabled(slot) {
+            return None;
+        }
+
         let current_index = current_shred.index();
         let fec_set_index = current_shred.fec_set_index();
         let data_complete = current_shred.data_complete();
@@ -1012,7 +1031,7 @@ impl Blockstore {
         let (shred_bytes, target_fec_set_index) = if data_complete {
             // Case (a): Current shred has DATA_COMPLETE=true (end of FEC set)
             // Check the 0th shred in the NEXT FEC set for UpdateParent
-            let next_fec_set_index = fec_set_index + DATA_SHREDS_PER_FEC_BLOCK as u32;
+            let next_fec_set_index = fec_set_index.checked_add(DATA_SHREDS_PER_FEC_BLOCK as u32)?;
             let shred_id = ShredId::new(slot, next_fec_set_index, ShredType::Data);
             let shred_bytes =
                 self.get_shred_from_just_inserted_or_db(just_inserted_shreds, shred_id, location);
@@ -1033,7 +1052,7 @@ impl Blockstore {
                 .and_then(|flags| {
                     flags
                         .contains(ShredFlags::DATA_COMPLETE_SHRED)
-                        .then(|| Cow::Borrowed(current_shred.payload()))
+                        .then_some(Cow::Borrowed(current_shred.payload()))
                 });
 
             (shred_bytes, fec_set_index)
@@ -1074,6 +1093,10 @@ impl Blockstore {
         just_inserted_shreds: &HashMap<(BlockLocation, ShredId), Cow<'_, Shred>>,
         write_batch: &mut WriteBatch,
     ) -> Result<()> {
+        if !self.block_markers_enabled() {
+            return Ok(());
+        }
+
         let slot = shred.slot();
         let previous_parent_info = ParentInfo::from_slot_meta(slot_meta);
 
@@ -1724,11 +1747,16 @@ impl Blockstore {
         }
     }
 
-    /// Computes and adds DoubleMerkleMeta to the write_batch for any newly completed slots.
+    /// Computes and adds DoubleMerkleMeta to the write_batch for newly completed
+    /// slots after block markers have been enabled.
     fn compute_double_merkle_meta_for_newly_completed_slots(
         &self,
         shred_insertion_tracker: &mut ShredInsertionTracker,
     ) -> Result<()> {
+        if !self.block_markers_enabled() {
+            return Ok(());
+        }
+
         for (&(location, slot), slot_meta_entry) in
             shred_insertion_tracker.slot_meta_working_set.iter()
         {
@@ -2170,6 +2198,34 @@ impl Blockstore {
 
     pub fn add_completed_slots_signal(&self, s: CompletedSlotsSender) {
         self.completed_slots_senders.lock().unwrap().push(s);
+    }
+
+    /// Configure marker parsing according to the current migration phase.
+    ///
+    /// Headers are useful during migration discovery, but `UpdateParent` is
+    /// Alpenglow-only. Keeping a separate start slot prevents an illegal
+    /// migration/Tower marker from reparenting `SlotMeta` before replay can
+    /// reject the block.
+    pub fn configure_block_markers_for_migration(&self, migration_status: &MigrationStatus) {
+        self.block_markers_enabled.store(
+            !migration_status.is_pre_feature_activation(),
+            Ordering::Release,
+        );
+        self.update_parent_enabled_from_slot.store(
+            migration_status
+                .first_slot_allowing_update_parent()
+                .unwrap_or(Slot::MAX),
+            Ordering::Release,
+        );
+    }
+
+    fn block_markers_enabled(&self) -> bool {
+        self.block_markers_enabled.load(Ordering::Acquire)
+    }
+
+    fn update_parent_enabled(&self, slot: Slot) -> bool {
+        let first_slot = self.update_parent_enabled_from_slot.load(Ordering::Acquire);
+        first_slot != Slot::MAX && slot >= first_slot
     }
 
     pub fn get_new_shred_signals_len(&self) -> usize {
@@ -13059,6 +13115,71 @@ pub mod tests {
         );
     }
 
+    #[test]
+    fn test_marker_config_skips_dmr() {
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+        blockstore.configure_block_markers_for_migration(&MigrationStatus::default());
+
+        let slot = 1000;
+        let (data_shreds, _, leader_schedule) = setup_erasure_shreds(slot, 990, 200);
+        blockstore
+            .insert_shreds(data_shreds, Some(&leader_schedule), true)
+            .unwrap();
+
+        assert!(blockstore.meta(slot).unwrap().unwrap().is_full());
+        assert!(
+            blockstore
+                .get_double_merkle_root(slot, BlockLocation::Original)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_update_parent_config_gate() {
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+        let migration_status = MigrationStatus::default();
+        migration_status.record_feature_activation(0);
+        blockstore.configure_block_markers_for_migration(&migration_status);
+
+        let slot = 10;
+        let header_parent = 5;
+        let update_parent = 3;
+        let header_parent_block_id = Hash::new_unique();
+        blockstore
+            .insert_shreds(
+                create_block_header_shreds(slot, header_parent, header_parent_block_id),
+                None,
+                true,
+            )
+            .unwrap();
+
+        blockstore
+            .insert_shreds(
+                create_update_parent_shreds_with_shred_parent(
+                    slot,
+                    header_parent,
+                    update_parent,
+                    Hash::new_unique(),
+                    32,
+                    true,
+                ),
+                None,
+                true,
+            )
+            .unwrap();
+
+        let meta = blockstore.meta(slot).unwrap().unwrap();
+        assert_eq!(meta.parent_slot, Some(header_parent));
+        assert_eq!(meta.parent_block_id, header_parent_block_id);
+        assert!(!meta.has_update_parent());
+        assert!(!blockstore.is_dead(slot));
+        verify_next_slots(&blockstore, header_parent, &[slot]);
+        verify_next_slots(&blockstore, update_parent, &[]);
+    }
+
     #[test_matrix([true, false], [
         (990, 980, false, false), // update parent before block header -> not dead
         (980, 990, false, true),  // update parent after block header -> dead
@@ -13462,7 +13583,7 @@ pub mod tests {
         // UpdateParent switches to connected parent, slot becomes connected
         blockstore
             .insert_shreds(
-                create_update_parent_shreds(10, 0, Hash::new_unique(), 32, true),
+                create_update_parent_shreds(10, 0, Hash::default(), 32, true),
                 None,
                 true,
             )
@@ -13502,7 +13623,7 @@ pub mod tests {
         // Reparent 100 to connected slot 0; connectivity propagates to 200 and 300
         blockstore
             .insert_shreds(
-                create_update_parent_shreds(100, 0, Hash::new_unique(), 32, true),
+                create_update_parent_shreds(100, 0, Hash::default(), 32, true),
                 None,
                 true,
             )
@@ -13590,7 +13711,7 @@ pub mod tests {
         // Reparent slot 50 to connected slot 0, keeping it incomplete
         blockstore
             .insert_shreds(
-                create_update_parent_shreds(50, 0, Hash::new_unique(), 32, false),
+                create_update_parent_shreds(50, 0, Hash::default(), 32, false),
                 None,
                 true,
             )

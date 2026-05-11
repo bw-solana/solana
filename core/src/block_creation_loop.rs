@@ -506,14 +506,12 @@ fn record_and_complete_block(
     // Write the single tick for this slot
 
     let footer = {
+        let reward_certs = recv_reward_certs(ctx, bank_slot)?;
         let BuildRewardCertsRespSucc {
             skip,
             notar,
             validators: _,
-        } = ctx
-            .reward_certs_receiver
-            .recv()
-            .map_err(|_| PohRecorderError::ChannelDisconnected)??;
+        } = reward_certs;
         let reward_cert = ValidatedRewardCert::try_new(&bank, &skip, &notar)?;
         let guard = ctx.highest_finalized.read().unwrap();
         let footer = produce_block_footer(&bank, skip, notar, guard.as_ref());
@@ -532,6 +530,32 @@ fn record_and_complete_block(
     drop(bank);
     w_poh_recorder.tick_alpenglow(max_tick_height, footer);
     Ok(())
+}
+
+/// Wait for the reward-certificate response for `bank_slot`, ignoring stale
+/// responses generated for banks that have already been abandoned.
+fn recv_reward_certs(
+    ctx: &LeaderContext,
+    bank_slot: Slot,
+) -> Result<BuildRewardCertsRespSucc, PohRecorderError> {
+    loop {
+        let BuildRewardCertsResponse {
+            bank_slot: response_bank_slot,
+            result,
+        } = ctx
+            .reward_certs_receiver
+            .recv()
+            .map_err(|_| PohRecorderError::ChannelDisconnected)?;
+
+        if response_bank_slot == bank_slot {
+            return result.map_err(PohRecorderError::from);
+        }
+
+        warn!(
+            "{}: ignoring stale reward cert response for bank slot {}, expected {bank_slot}",
+            ctx.my_pubkey, response_bank_slot
+        );
+    }
 }
 
 /// Similar to `maybe_start_leader`, however if replay of the parent block is lagging we retry

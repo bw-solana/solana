@@ -2313,6 +2313,7 @@ fn load_frozen_forks(
     snapshot_controller: Option<&SnapshotController>,
 ) -> result::Result<(u64, usize), BlockstoreProcessorError> {
     let migration_status = bank_forks.read().unwrap().migration_status();
+    blockstore.configure_block_markers_for_migration(&migration_status);
     let blockstore_max_root = blockstore.max_root();
     let mut root = bank_forks.read().unwrap().root();
     let max_root = std::cmp::max(root, blockstore_max_root);
@@ -2410,6 +2411,7 @@ fn load_frozen_forks(
                 // We are safe to cleanly transition to alpenglow here
                 if migration_status.is_ready_to_enable() {
                     let genesis_slot = migration_status.enable_alpenglow_during_startup();
+                    blockstore.configure_block_markers_for_migration(&migration_status);
 
                     // We need to clear pending_slots as it might contain Alpenglow blocks initialized as TowerBFT banks.
                     // Clear and populate pending slots from alpenglow genesis
@@ -2531,6 +2533,7 @@ fn load_frozen_forks(
                         .activated_slot(&agave_feature_set::alpenglow::id())
                     {
                         migration_status.record_feature_activation(slot);
+                        blockstore.configure_block_markers_for_migration(&migration_status);
                     }
                 }
             }
