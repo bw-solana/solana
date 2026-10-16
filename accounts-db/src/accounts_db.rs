@@ -20,6 +20,8 @@
 
 mod accounts_db_config;
 mod geyser_plugin_utils;
+#[cfg(test)]
+mod pq_overlay_tests;
 pub(crate) mod stats;
 pub(crate) mod tests;
 
@@ -746,9 +748,25 @@ type CleaningCandidatesBin = HashSet<Pubkey, PubkeyHasherBuilder>;
 type CleaningCandidates = Box<[RwLock<CleaningCandidatesBin>]>;
 type AccountInfoAccountsIndex = AccountsIndex<AccountInfo, AccountInfo>;
 
+/// An immutable, structurally shared account view for a speculative PQ Bank.
+/// Values retain the protocol slot at which they changed, not a local storage id.
+pub type PqAccountSnapshot = imbl::HashMap<Pubkey, (AccountSharedData, Slot)>;
+
+#[derive(Debug)]
+struct PqAccountsOverlay {
+    parent: Arc<PqAccountSnapshot>,
+    parent_state: [u8; 48],
+    /// The original AccountsDB serviced by persistence/background workers.
+    storage: Arc<AccountsDb>,
+    promoted: AtomicBool,
+}
+
 // This structure handles the load/store of the accounts
 #[derive(Debug)]
 pub struct AccountsDb {
+    /// Present only for an explicitly isolated PQ fork. The local cache/index
+    /// contains writes; immutable inherited accounts are never copied into it.
+    pq_overlay: Option<PqAccountsOverlay>,
     /// Keeps tracks of index into AppendVec on a per slot basis
     pub accounts_index: AccountInfoAccountsIndex,
 
@@ -881,6 +899,144 @@ pub fn quarter_thread_count() -> usize {
 }
 
 impl AccountsDb {
+    /// A copy-on-write fork with a fixed immutable parent account view. Only
+    /// changed accounts enter this database's ordinary cache/index.
+    pub fn new_pq_overlay(
+        parent: Arc<PqAccountSnapshot>,
+        parent_state: [u8; 48],
+        storage: Arc<AccountsDb>,
+    ) -> Self {
+        let config = AccountsDbConfig {
+            index: Some(crate::accounts_index::AccountsIndexConfig {
+                bins: Some(64),
+                num_flush_threads: std::num::NonZeroUsize::new(1),
+                ..Default::default()
+            }),
+            num_background_threads: std::num::NonZeroUsize::new(1),
+            read_cache_num_shards: Some(64),
+            read_cache_limit_bytes: Some((1024 * 1024, 2 * 1024 * 1024)),
+            ..Default::default()
+        };
+        let mut db = Self::new_with_config(Vec::new(), config, None, Arc::default());
+        db.pq_overlay = Some(PqAccountsOverlay {
+            parent,
+            parent_state,
+            storage,
+            promoted: AtomicBool::new(false),
+        });
+        db
+    }
+
+    /// Return the original persisted database without changing the account
+    /// view used by this fork. Advancing its root cannot affect a snapshot.
+    pub fn pq_storage_db(self: &Arc<Self>) -> Arc<Self> {
+        self.pq_overlay
+            .as_ref()
+            .map_or_else(|| Arc::clone(self), |overlay| Arc::clone(&overlay.storage))
+    }
+
+    /// Materialize the next immutable view by structurally sharing the parent
+    /// map and changing only keys written in this fork. No account-data copies
+    /// or parent database scans are needed for an overlay.
+    pub fn pq_account_snapshot(
+        &self,
+        ancestors: &Ancestors,
+        bank_id: BankId,
+    ) -> ScanResult<Arc<PqAccountSnapshot>> {
+        self.pq_account_snapshot_with_delta(ancestors, bank_id)
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    /// Capture the same immutable account view and the exact overlay keys
+    /// visited by its successful local scan, including zero-lamport writes.
+    /// A stock database returns no delta: its complete view must be rebuilt.
+    /// The keys describe native writes rather than inferring modifications
+    /// from physical storage slots, which can change during persistence.
+    pub fn pq_account_snapshot_with_delta(
+        &self,
+        ancestors: &Ancestors,
+        bank_id: BankId,
+    ) -> ScanResult<(Arc<PqAccountSnapshot>, Option<Vec<Pubkey>>)> {
+        let mut snapshot = self
+            .pq_overlay
+            .as_ref()
+            .map_or_else(PqAccountSnapshot::new, |overlay| (*overlay.parent).clone());
+        let mut written = self.pq_overlay.as_ref().map(|_| Vec::new());
+        self.scan_accounts_local(
+            ancestors,
+            bank_id,
+            |entry| {
+                if let Some((pubkey, account, slot)) = entry {
+                    if let Some(written) = &mut written {
+                        written.push(*pubkey);
+                    }
+                    if account.is_zero_lamport() {
+                        snapshot.remove(pubkey);
+                    } else {
+                        snapshot.insert(*pubkey, (account, slot));
+                    }
+                }
+            },
+            &ScanConfig::default(),
+        )?;
+        Ok((Arc::new(snapshot), written))
+    }
+
+    /// Persist only the certified candidate's writes, without re-executing its
+    /// transactions. Caller must verify the complete certificate and frozen
+    /// Bank commitment first, and serialize this with root publication.
+    pub fn promote_pq_overlay(
+        &self,
+        slot: Slot,
+        parent_slot: Slot,
+        bank_id: BankId,
+        ancestors: &Ancestors,
+        expected_parent_state: [u8; 48],
+    ) -> ScanResult<()> {
+        let overlay = self
+            .pq_overlay
+            .as_ref()
+            .ok_or_else(|| ScanError::Aborted("only a PQ overlay can be promoted".to_owned()))?;
+        if overlay.parent_state != expected_parent_state
+            || overlay.storage.max_root() != parent_slot
+        {
+            return Err(ScanError::Aborted(
+                "PQ overlay must promote from the current canonical root".to_owned(),
+            ));
+        }
+        let mut delta = Vec::new();
+        self.scan_accounts_local(
+            ancestors,
+            bank_id,
+            |entry| {
+                if let Some((pubkey, account, modified_slot)) = entry {
+                    assert_eq!(
+                        modified_slot, slot,
+                        "PQ overlay contains another slot's writes"
+                    );
+                    delta.push((*pubkey, account));
+                }
+            },
+            &ScanConfig::default(),
+        )?;
+        if overlay.promoted.swap(true, Ordering::AcqRel) {
+            return Err(ScanError::Aborted(
+                "PQ overlay was already promoted".to_owned(),
+            ));
+        }
+        // A detached candidate has no physical Bank parent for squash() to
+        // visit. Root the already-certified parent cache too (notably genesis).
+        overlay.storage.add_root(parent_slot);
+        crate::accounts::Accounts::new(Arc::clone(&overlay.storage)).store_accounts(
+            (slot, delta.as_slice()),
+            bank_id,
+            None,
+            ancestors,
+        );
+        overlay.storage.mark_slot_frozen(slot);
+        Ok(())
+    }
+
     // The default high and low watermark sizes for the accounts read cache.
     // If the cache size exceeds MAX_SIZE_HI, it'll evict entries until the size is <= MAX_SIZE_LO.
     //
@@ -945,6 +1101,7 @@ impl AccountsDb {
             .expect("new rayon threadpool");
 
         let new = Self {
+            pq_overlay: None,
             accounts_index,
             paths,
             bank_hash_details_dir: accounts_db_config.bank_hash_details_dir,
@@ -2478,6 +2635,61 @@ impl AccountsDb {
     where
         F: FnMut(Option<(&Pubkey, AccountSharedData, Slot)>),
     {
+        if let Some(overlay) = &self.pq_overlay {
+            let mut scan_guard =
+                ScanGuard::try_new(&self.scan_tracker, bank_id, || self.max_root()).ok_or(
+                    ScanError::SlotRemoved {
+                        slot: ancestors.max_slot(),
+                        bank_id,
+                    },
+                )?;
+            let mut changed = ahash::HashSet::new();
+            self.scan_accounts_local(
+                ancestors,
+                bank_id,
+                |entry| {
+                    if let Some((pubkey, _, _)) = &entry {
+                        changed.insert(**pubkey);
+                    }
+                    scan_func(entry);
+                },
+                config,
+            )?;
+            for (pubkey, (account, slot)) in overlay.parent.iter() {
+                if config.is_aborted() {
+                    return Err(ScanError::Aborted("PQ snapshot scan aborted".to_owned()));
+                }
+                if scan_guard.is_bank_removed() {
+                    return Err(ScanError::SlotRemoved {
+                        slot: ancestors.max_slot(),
+                        bank_id,
+                    });
+                }
+                if !changed.contains(pubkey) {
+                    scan_func(Some((pubkey, account.clone(), *slot)));
+                }
+            }
+            if scan_guard.was_scan_corrupted() {
+                return Err(ScanError::SlotRemoved {
+                    slot: ancestors.max_slot(),
+                    bank_id,
+                });
+            }
+            return Ok(());
+        }
+        self.scan_accounts_local(ancestors, bank_id, scan_func, config)
+    }
+
+    fn scan_accounts_local<F>(
+        &self,
+        ancestors: &Ancestors,
+        bank_id: BankId,
+        mut scan_func: F,
+        config: &ScanConfig,
+    ) -> ScanResult<()>
+    where
+        F: FnMut(Option<(&Pubkey, AccountSharedData, Slot)>),
+    {
         // Register this scan so that slots needed by the scan are not cleaned out from under us.
         let mut scan_guard = ScanGuard::try_new(&self.scan_tracker, bank_id, || self.max_root())
             .ok_or(ScanError::SlotRemoved {
@@ -2578,7 +2790,7 @@ impl AccountsDb {
             IndexKey::SplTokenMint(key) => key,
             IndexKey::SplTokenOwner(key) => key,
         };
-        if !self.account_indexes.include_key(key) {
+        if self.pq_overlay.is_some() || !self.account_indexes.include_key(key) {
             // the requested key was not indexed in the secondary index, so do a normal scan
             let used_index = false;
             self.scan_accounts(ancestors, bank_id, scan_func, config)?;
@@ -2984,6 +3196,41 @@ impl AccountsDb {
     }
 
     fn do_load(
+        &self,
+        ancestors: &Ancestors,
+        pubkey: &Pubkey,
+        load_hint: LoadHint,
+        populate_read_cache: PopulateReadCache,
+        load_filter: Option<impl Fn(u64, &Pubkey, usize) -> bool>,
+    ) -> Option<(AccountSharedData, Slot)> {
+        if let Some(overlay) = &self.pq_overlay {
+            // Apply the filter after selecting the newest account. A rejected
+            // local value or tombstone must never reveal its inherited value.
+            let local = self.do_load_local(
+                ancestors,
+                pubkey,
+                load_hint,
+                populate_read_cache,
+                None::<fn(_, &_, _) -> _>,
+            );
+            let (account, slot) = local.or_else(|| overlay.parent.get(pubkey).cloned())?;
+            return load_filter
+                .as_ref()
+                .is_none_or(|filter| {
+                    filter(account.lamports(), account.owner(), account.data().len())
+                })
+                .then_some((account, slot));
+        }
+        self.do_load_local(
+            ancestors,
+            pubkey,
+            load_hint,
+            populate_read_cache,
+            load_filter,
+        )
+    }
+
+    fn do_load_local(
         &self,
         ancestors: &Ancestors,
         pubkey: &Pubkey,
@@ -3934,6 +4181,16 @@ impl AccountsDb {
         &self,
         ancestors: &Ancestors,
     ) -> AccountsLtHash {
+        if self.pq_overlay.is_some() {
+            let snapshot = self
+                .pq_account_snapshot(ancestors, BankId::new(0))
+                .expect("cannot calculate PQ snapshot accumulator after a failed scan");
+            let mut hash = LtHash::identity();
+            for (pubkey, (account, _)) in snapshot.iter() {
+                hash.mix_in(&Self::lt_hash_account(account, pubkey).0);
+            }
+            return AccountsLtHash(hash);
+        }
         // This impl iterates over all the index bins in parallel, and computes the lt hash
         // sequentially per bin.  Then afterwards reduces to a single lt hash.
         // This implementation is quite fast.  Runtime is about 150 seconds on mnb as of 10/2/2024.
@@ -4021,6 +4278,16 @@ impl AccountsDb {
     ///
     /// Only intended to be called at startup by ledger-tool or tests.
     pub fn calculate_capitalization_at_startup_from_index(&self, ancestors: &Ancestors) -> u64 {
+        if self.pq_overlay.is_some() {
+            return self
+                .pq_account_snapshot(ancestors, BankId::new(0))
+                .expect("cannot calculate PQ snapshot capitalization after a failed scan")
+                .values()
+                .try_fold(0u64, |sum, (account, _)| {
+                    sum.checked_add(account.lamports())
+                })
+                .expect("capitalization cannot overflow");
+        }
         let stored_lamports = |pubkey: &Pubkey| {
             self.accounts_index
                 .get_with_and_then(pubkey, ancestors, false, |(slot, account_info)| {
@@ -4590,6 +4857,17 @@ impl AccountsDb {
     /// Returns whether the latest version of pubkey from ancestors is zero-lamport
     /// Returns `None` if the account doesn't exist
     fn is_ancestor_zero_lamport(&self, pubkey: &Pubkey, ancestors: &Ancestors) -> Option<bool> {
+        if self.pq_overlay.is_some() {
+            return self
+                .do_load(
+                    ancestors,
+                    pubkey,
+                    LoadHint::FixedMaxRoot,
+                    PopulateReadCache::False,
+                    None::<fn(_, &_, _) -> _>,
+                )
+                .map(|(account, _)| account.is_zero_lamport());
+        }
         if let Some((cached_account, _cache_slot)) =
             self.accounts_cache.load_latest(pubkey, ancestors)
         {
@@ -4789,6 +5067,13 @@ impl AccountsDb {
     }
 
     pub fn add_root(&self, slot: Slot) -> AccountsAddRootTiming {
+        if let Some(overlay) = &self.pq_overlay {
+            assert!(
+                overlay.promoted.load(Ordering::Acquire),
+                "uncertified PQ overlay cannot become root"
+            );
+            overlay.storage.add_root(slot);
+        }
         let mut cache_time = Measure::start("cache_add_root");
         self.accounts_cache.add_root(slot);
         cache_time.stop();
@@ -4810,6 +5095,13 @@ impl AccountsDb {
         &self,
         requested_slots: impl RangeBounds<Slot> + Sync,
     ) -> (Vec<Arc<AccountStorageEntry>>, Vec<Slot>) {
+        if let Some(overlay) = &self.pq_overlay {
+            assert!(
+                overlay.promoted.load(Ordering::Acquire),
+                "unpromoted PQ overlays cannot be snapshotted"
+            );
+            return overlay.storage.get_storages(requested_slots);
+        }
         let start = Instant::now();
         let (slots, storages) = self
             .storage

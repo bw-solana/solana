@@ -58,6 +58,7 @@ members = [
     "perf",
     "poh",
     "poh-bench",
+    "pq-crypto",
     "precompiles",
     "program-binaries",
     "program-runtime",
@@ -129,6 +130,7 @@ members = [
 ]
 
 exclude = [
+    "pq-prototype",
     "ci/xtask",
     "dev-bins",
     "programs/sbf",
@@ -206,6 +208,9 @@ used_underscore_binding = "deny"
 new_without_default = "allow"
 
 [workspace.dependencies]
+zeroize = "1.8.2"
+sha2 = "0.10.9"
+agave-pq-crypto = { path = "pq-crypto", version = "=4.5.0-alpha.2" }
 Inflector = "0.11.4"
 agave-banking-stage-ingress-types = { path = "banking-stage-ingress-types", version = "=4.5.0-alpha.2", features = ["agave-unstable-api"] }
 agave-bls-cert-verify = { path = "bls-cert-verify", version = "=4.5.0-alpha.2", features = ["agave-unstable-api"] }

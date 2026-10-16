@@ -53,6 +53,7 @@ stable-abi = [
 shuttle-test = ["dep:shuttle"]
 
 [dependencies]
+agave-pq-crypto = { workspace = true }
 agave-bls-cert-verify = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-fs = { workspace = true }
@@ -85,6 +86,7 @@ rand = { workspace = true }
 rayon = { workspace = true }
 regex = { workspace = true }
 semver = { workspace = true }
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shuttle = { workspace = true, optional = true }
@@ -204,6 +206,8 @@ solana-stake-interface = { workspace = true, features = ["bincode"] }
 solana-svm = { path = "../svm", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-transaction-context = { path = "../transaction-context", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-vote-program = { path = "../programs/vote", default-features = false, features = ["agave-unstable-api", "dev-context-only-utils"] }
+solana-zk-sdk = { workspace = true }
+solana-zk-elgamal-proof-interface = { workspace = true }
 static_assertions = { workspace = true }
 test-case = { workspace = true }
 

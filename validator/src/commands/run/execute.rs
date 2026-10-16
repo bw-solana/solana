@@ -738,6 +738,11 @@ pub fn execute(
     }
 
     let mut validator_config = ValidatorConfig {
+        experimental_pq: matches
+            .value_of("experimental_pq_config")
+            .map(|path| solana_core::experimental_pq::ExperimentalPqConfig::read(Path::new(path)))
+            .transpose()
+            .map_err(|err| format!("invalid PQ configuration: {err:#}"))?,
         log_config,
         require_tower: matches.is_present("require_tower"),
         require_vote_history: !matches.is_present("do_not_require_vote_history"),

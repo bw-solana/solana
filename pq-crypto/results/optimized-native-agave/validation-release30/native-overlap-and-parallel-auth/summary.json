@@ -1,0 +1,292 @@
+{
+  "format": "main30-validation-release-public-summary-v1",
+  "native_release": 30,
+  "scope": "Local source, functional validation, optimized build and separate microbenchmarks. Runtime performance/acceptance is reported separately.",
+  "functional_distinct_passed": 216,
+  "functional_pass_occurrences": 217,
+  "functional_counts": {
+    "crypto_primitives": 20,
+    "core": 104,
+    "consensus": 7,
+    "quantumglow": 22,
+    "network": 21,
+    "ledger": 25,
+    "tls": 17,
+    "actual_fresh_R_genesis_compatibility": 1
+  },
+  "deduplicated_overlap": [
+    {
+      "test": "quantumglow_tests::fast_and_slow_network_finality_with_restart_and_transient_loss",
+      "check_occurrences": [
+        "crypto-quantumglow-second",
+        "crypto-network-second"
+      ]
+    }
+  ],
+  "separate_explicit_ignored_release_benchmarks": 3,
+  "other_ignored_test_not_executed": "blockstore::tests::benchmark_experimental_pq_incremental_journal_storage",
+  "all79_source_files_checked_before_after": true,
+  "source_revision": "Exact final Main30 THIRD source set",
+  "source_manifest_sha384": "d9067798839cbe789909b3832b678fc782db09d4f198274fec666610b57ebe478aad5b87ccd84136540df4442565f907",
+  "source_files_sha384": {
+    "Cargo.lock": "b3b68c07e8bf15b756fb21b87d8f810dbc4ce78151ff56cacfba0f5e9da03a3f19132143f927ba8e4935291c55cb3d8d",
+    "Cargo.toml": "7e9fcaa1a856f6df98c16412709c1bda2d81d1cc86bdbb730720ac2015164ca5448d7d07700214c5d24bdc1e9ee36128",
+    "accounts-db/Cargo.toml": "badb45a0c13c99a34e589d5e8c74298f57805b14e5567a5b781fa5910acffe8f0f3d536c29f3932eb9095f18cc1638ff",
+    "accounts-db/src/accounts_db.rs": "f3ad56da7839455134191a0ab45f3c49696415dcb7528f9b649d3c0fbf3991f56aab5608a2d82f327ccf8e09fbab75b5",
+    "accounts-db/src/accounts_db/pq_overlay_tests.rs": "211443f21fa7ad2ab5ed120629bca4c1fae265da66daa545c6809696a931db1b528fccc91e602a7ff201f57754d59fbd",
+    "accounts-db/src/ancestors.rs": "3e7c238695af55fd1581eb7b5a445217fee798f8430305e8fdff59656985f5c8fcf66c184dd02a7592c2dfb6f796e1af",
+    "core/Cargo.toml": "9463cfe5b634ec7ece58356dd37f2a17c1d9902ad328cba0390d8ba27e44d6f1c932697012fa8bf8b78a966c28a2aec5",
+    "core/src/experimental_pq.rs": "c895e3fcb586385ef1c19013fba557901a281151a016a0838a1f71dbe62b000e1c5f07b154b5d905e67266952bf66ce9",
+    "core/src/experimental_pq_execution.rs": "715c88d143873f11608972f6d140381f35ec9f662064ef4442a1492ae8c38379bb5c101441f81ee3b2e719c310fb3a6a",
+    "core/src/experimental_pq_pipeline.rs": "fb7fe16433018cd1853419d361dd5834a84f71e4789a96448514f05ba3a62b1806cd66cf9181607dd262f8f2bdd30120",
+    "core/src/lib.rs": "7986635667ff9ea314bb281ad17787563533724fefd7f470a3decc76b6998e612c298bdf3fb072bd8b2aa6be96a7b277",
+    "core/src/validator.rs": "2b69828f45bcc426d397e795da051abfc1bc7e08b16dd9cde99e255cb946143774a6af2900df1f8d91d527f7b8dafb5c",
+    "core/tests/fixtures/pq-svm/README.md": "a0ebfb44a3649b4d5586fbba95491186c177c9aeaf02267452f346cd3ac74a943eb99a4c00cb737d51b8da211ba513d3",
+    "core/tests/fixtures/pq-svm/move_funds.so": "5103801e77620bd45a6e24b393341723c24efad91c6ed1fd2a950b29b1b13997c18942d58ae79a5b487a354501c3be24",
+    "ledger/Cargo.toml": "be64e7db995f52bd95dff6b0f43db4eb960295ef24bf93efa68bde7a21441049f58ba425cdf6dc419c584e05e068ad60",
+    "ledger/src/blockstore.rs": "b0b998856b91916a9a9f7fb5fe4799b1d44b7bd81e62b81649c147eafcd2cfb13811cc3768c88ed9ef1eb5549cb0b449",
+    "ledger/src/blockstore/column.rs": "770ddc172e6bc5e0996eb2a6d0ae2c248a1cbb3306d0c4184ffe239154fc356ddabfb93f6897e0656cd63a9441f1e097",
+    "ledger/src/blockstore/tests.rs": "89e0a7fde746ef711955a8321203843442ad32a3b9b45fd478aeb701f15344faf9a0a1cce27320bc7e5e83873eb314b9",
+    "ledger/src/blockstore_db.rs": "ff49d3fd87e9d801a6684835d4b9f9d0e7a01d4f547951b9e7f22c2fe40923ef99c636c5f575c38d1c26f5c78201601d",
+    "pq-crypto/Cargo.toml": "e1962cee875d1ba775467db4048ae6d569fae82d6b38b659e93f901b1aedc3df017a092a31887ed5b17a76ba6e162055",
+    "pq-crypto/src/auth.rs": "8207440c9c212fdb45ad592342af9029fdffb41c3451b931f744d55911b75a9725afc303ca4ff109d5e5b4ce9b8cbc79",
+    "pq-crypto/src/ax.rs": "d47746894ad1337b29c0158f0ccc960bc30bbda87062437c881ebe315ddb62e3d96d08a77def0ebbbf013edd71a750bb",
+    "pq-crypto/src/ax_state.rs": "1e5f68231e3667c31aca9c1b6ce2d839b8d919d3e7778d57a0e07db4b3126c955f71070dd917ed5e8a03320d438ac195",
+    "pq-crypto/src/checkpoint.rs": "a252d7cb32dcc359b2e85951c6f628aed19cc28decdb21eadd71d446c802d5fce16ac8c18b87981b7494bac44b96b7ce",
+    "pq-crypto/src/consensus.rs": "6b3e24f9318ec080cd051dc61e89130db211cd23d8f683059d68da87445f1cfba41647642743c98ebf73e16f771e3065",
+    "pq-crypto/src/crypto.rs": "fbac035a4ed5d228ca84ff23be09170a24c7eb12927530e7a50990ded4dcc614b35b3c785a379b99955df113448b4874",
+    "pq-crypto/src/lib.rs": "b6e7c79e01407dac1511c25a01713f5318ef9ab1bad531461448977b76df989f51e187181b36bfdf1beb0082420d24c2",
+    "pq-crypto/src/migration.rs": "6d0a448ac4f11e3bc87aad559b65ae5ea168e86e7997a4309eed5a154a2fae8361fb10f535d2ef59dd321e8e75c988ba",
+    "pq-crypto/src/network.rs": "fd49d5148a31f919fdc9c8ead3cb04cb0229ada8b499a82b5803212c2d10f01961a5c701db5f8a18a6894619b61ae45f",
+    "pq-crypto/src/quantumglow.rs": "4f05272fbfb9707637178cb581e7b03966d9e36f9d9ff91ed84d5a1aac09d7746bc739795198838b445db7a945dfe480",
+    "pq-crypto/src/quantumglow_tests.rs": "ac7c8abc9291de85ea721d4a2e33e34d64f5c067277ef08627d41b451bff56ee0cc706198d5c7c3d5fe2bd5abf737e97",
+    "pq-crypto/src/seed_proof/circuit.rs": "066196a1f77d6ee223f941c2b31d9ddd78d926199ccb569b5e1bd5002a86b834ed9922abc41e6c85baec7b75b9d48728",
+    "pq-crypto/src/seed_proof/edwards.rs": "ca799ba24ca6e8b0e93dc7d31feae80fde59270def3fcb2419bd7b336724640eebb981cad83ad1229ca831b65ae79406",
+    "pq-crypto/src/seed_proof/encoding.rs": "62bc14704a7206d9480b71596b31c16b706d9acb43c724c5a62ab5a75b8aa7aa63ce6fd9583506daa36b91770a5f848a",
+    "pq-crypto/src/seed_proof/mod.rs": "b82dd7f01c0e02301e507dd13caf8e22e86787a4f4d49011a9cb013c415a74b3e29d4aa555b9022a0eb578bd4434fec3",
+    "pq-crypto/src/seed_proof/sha512.rs": "58c87817206335d0ce54879278c3edcb983a4c3095ff7120fc4ffee5ab3b1a90679b669c69936ff04a95a422ee5c8311",
+    "pq-crypto/src/seed_proof/sha512_constants.rs": "560b4d50363052a6a156ca2a4181cb8209d182daf8c5cceac318e5b8fc5ab5879f2eb3730de89edb93faccd4f3e14acc",
+    "pq-crypto/src/seed_proof/stark.rs": "d02e15bd35cc4d395bcbac4f81e353849141fefe7015518256ec24c4e1b070c86f0d38bc5e1dfc6d0eb66c77213d5e22",
+    "pq-crypto/src/transaction.rs": "10b9846a4d7ef5ee46d41d85bf5e03ac60f64cbf125bb5954aca761e7275bf587f4837e4d798ca598ec7a3575e84895c",
+    "pq-crypto/test-vectors/ax.json": "7dd7f2cd2a93f39350147efecb09ac0402fe942f19d60259c23e435bf0cea7baa6412df5d68804351b3cccdbeff0ad85",
+    "program-runtime/src/invoke_context.rs": "112a16da8fdf097ebcf5170f183daa441b3dd1af35056c797ed53c0404fdb5624ebe404cb6d1c3e24c62d222bd6c30f1",
+    "rpc/Cargo.toml": "1f81a40cec29c1b69c952014694cae9764d262027e1dd24792b5bc991592b0afd367e5240e39dca5da645a71e089326a",
+    "rpc/src/rpc.rs": "4d309ae94700b78ba8423a47ca4c0cf156c63ea69d69974db0a8f1e483ca5e06ea01dcd2b88262bdd2e92c3bc7b4abe4",
+    "rpc/src/rpc_service.rs": "f6b14c667806a9ed06c0e9f08e526273ccd9a2145b0e8d9a69a3670d821fad38d180adb55c4cca1acd55cb286dc1a0c4",
+    "runtime/Cargo.toml": "8219f223fd2fd37508e1c21245471ac19572c0b5531bb1c5dd5f4f7f29d042b8d5492c34e1fb36d180ebf82ce281e5b9",
+    "runtime/benches/epoch_turnover.rs": "a169445f4db93f8a882b166cece18fc0b4c8a7f878f948cf4b46fb8529a724c9f55956514e2923e1959ccfb1aa5fd869",
+    "runtime/src/accounts_background_service.rs": "ec4f620aba555b7cc9ce4fd37d6373b4a6934ce648369caccc3a85a9e9b2b6fe7d739dc04f3c30dbbd08132a266cab00",
+    "runtime/src/bank.rs": "a10bff9f1a36ae1b380b353b857e5dae38d0fa9c3ed95a7012b330c942d8e9f8fc7baab5cdce7af42f4158d8233d0860",
+    "runtime/src/bank/check_transactions.rs": "b663b1de67da1e586b185279c20505a99eb7f22bd1d41a2c85b643188e633edc2c66f46d26d698b6e5c7f236162f4b6e",
+    "runtime/src/bank_forks.rs": "c38593e2fe95d8e3e83877a695109c224030949d4613bf0348198a65057a129d5e7f29e982fdc42e45300590c91bdd88",
+    "runtime/src/lib.rs": "ec5faeeb28a08fc6e1fe6e49fd1b7124fdf23d18b5b34b57c05d2c6b14b380f2a0416df23d69ba47f20aa945de2ca77f",
+    "runtime/src/pq.rs": "0c53f0af28107099084934071d67b3ba0a1742e32671c270827b58e70ecab3f64e6a3814b8717398782a4fc83402f126",
+    "runtime/src/pq_program.rs": "14101cd374e2d5f14bfb11bb50fc079f3052de3d47e6b0b60821ddc8b35c3b6edefb5f6e2214aa908c12e78156fca366",
+    "runtime/src/pq_workload.rs": "2a4530d683705978a8d60593094c9df6a9c939befa8bbac2311bb7277e42558b6d8d60b90f1a3b680a3df10964b7750d",
+    "runtime/src/status_cache.rs": "a2baf91e52c89625413af66cee0ec4ba16c5e68485ac6cdb0cee2e608a35035bd342117b77669f66b64bb698c3f28d56",
+    "runtime/tests/fixtures/pq-svm/README.md": "927d311070c82d3436b6f392a72128567abf4d083d938cf0ba6cd58073411b55bc59bfb429ef1aa161ee2350634abb3a",
+    "runtime/tests/fixtures/pq-svm/move_funds.so": "5103801e77620bd45a6e24b393341723c24efad91c6ed1fd2a950b29b1b13997c18942d58ae79a5b487a354501c3be24",
+    "runtime/tests/fixtures/pq-svm/move_funds_v3.so": "93ea744124d86b5fa08670d6a1cb75efe378b855e3e1e361e19f6b4a542cde1b643b98306ee5dd8d95951b86c32463b2",
+    "runtime/tests/fixtures/pq-svm/sbpf_v3.ld": "835bc7d4748fa9dce13c51ad365946693c4f504a2bafbf29ffdd4e0a411e3ed23c45442dd07f8511ef5f0774025bfbc3",
+    "runtime/tests/fixtures/pq-svm/workload.c": "36bbe09e1940ea232d9ee45193aab6e8377cc9ee50541daeb5719b4e90d05fb9097c57252793779f81f92cede051b039",
+    "runtime/tests/fixtures/pq-svm/workload.so": "e4c2a8e4a7169188f623c4da632f5f99df7690b82bcaea137bce21203b982b268916f9d524037dd75b9e73413134ad0d",
+    "svm-callback/src/lib.rs": "531bdec8ceb1799954c0c452d35e616bdfbf8f5ebc07216665a238f1e6ed5b4b5cb79b261eb7e60100864ca816c96b57",
+    "svm/src/transaction_processor.rs": "2fa8535d0c7d4f51f10b353bcfbe3b1d37eb54da6275f9f738930eeddd72cb4e78edecbda50025be29563942fc912d37",
+    "syscalls/Cargo.toml": "d774ce7b32bedf515824c2548ab529969bd2b78adb96100965ccbb3e7759fd8e7da672633a0d4d1d67a973e5681619da",
+    "syscalls/src/lib.rs": "e795a4e6db2dc545a8aff319859dd3e5d54f90669bf375a91b1d44f47768844630e6d1a0bd69a7fb33aad6e6f2b85835",
+    "tls-utils/Cargo.toml": "aa27b97cb39e6a455b245dd696d911ebb3523ef7ca3ac0c3a7078347d7f549f87c7beaecccf39ba28441817d17caca59",
+    "tls-utils/src/lib.rs": "d9a562cf47c167aab7f55156929bc7fc237c910f79bfcea430109a78ea39e53575b8ba3b4234299b39d3884528390866",
+    "tls-utils/src/pq/mod.rs": "71fe005dc1992b7616476b4889135156dce274195a045f95e90518bfb3f681c965189d6f5e8bb8f1553f244bba2aa5c6",
+    "tls-utils/src/pq/tls.rs": "eefc44377398d399d19e992a2d3f196732acf06f82fa57f5507d936ace3c278d6e1c3544712b4edb1eaed3ef7dd0489f",
+    "tls-utils/src/pq/trace.rs": "8263b9ccaacc13a7e8185c70d044d40a364a42cdf8c648916fe93d6e8e24d546fda95707dd555b14af67e1f28dc9d18b",
+    "validator/Cargo.toml": "e78c9e0e645693f64ea1d2da2683fa31de00c6b4e8d1e7760c2038d9d6e8a106b7540167f51518bf5d0a5600da09e1e5",
+    "validator/src/bin/agave-pq-tool.rs": "972ae7fbe9d822b9bff5cffd9b6bc8cff8539d1d444311d2bcdaa02e6dea03b7b1839e656406264b38a05d4168bf377b",
+    "validator/src/bin/agave_pq_tool/migrate.rs": "621862b2084c7a52036f03ea1f34714a73bcf983e6a605936592a65cbe5a49631f5636f0698896fa14911b61a3a56d83",
+    "validator/src/bin/agave_pq_tool/observer.rs": "e17c6c9bf51a7e4fec54c7546ea450cf0b361a561a00ad3640bc5d634de9c286dbb95294b1b5ba3de3cd7c8bb57fbdae",
+    "validator/src/bin/agave_pq_tool/soak.rs": "dd601baed3a93df2a2eaebaf064f21ca3a3cfff6aafdddaa518f5fd90e7ae9d3c9695678dd803b36041b4ecdd8888b8b",
+    "validator/src/bin/agave_pq_tool/transport.rs": "8a1cac822aaa1bc2c155c142117ac420e327ee1bc28f9478efe6c64fe7d895207bcef6bad0193b270b05a8d236b427ba",
+    "validator/src/commands/run/args.rs": "28412892af4e63c3ad9365f330c6c305f488e18565f6acffece3051a9937500ea356c8875d3533e78d2b3e27505deda8",
+    "validator/src/commands/run/args/json_rpc_config.rs": "4c99dc38b845554e8cf01ca287261e512781eabd326b17ce23817db22eb70ecc0f088364bc20dee07cd338aae139545c",
+    "validator/src/commands/run/execute.rs": "65abd23a980256b13ed6432aaff961bf4e78dfa3b09effed1c9ff73dcd429aa3ef6b4d454a2f16f9a4093e5261a65787"
+  },
+  "production_delta_from_final_Main29": "One canonical-signature encoding parser success entry per thread; exact full666-byte equality; bounded best-effort borrow/access fallback. Cryptographic verification and authorization are still performed.",
+  "cache_scope": {
+    "entries_per_thread": 1,
+    "canonical_signature_bytes": 666,
+    "observed_TLS_structure_bytes_on_64bit": 680,
+    "success_only": true,
+    "exact_full_byte_equality": true,
+    "authentication_or_vendor_math_results_cached": false,
+    "unchanged_scalar_fallback": true,
+    "actual_TLS_destruction_control": false,
+    "TLS_access_error_fallback_qualification": "Structural try_with fallback; actual TLS destruction was not exercised because the cache has no destructor."
+  },
+  "quality_gates": {
+    "strict_clippy_all_targets_Dwarnings": [
+      "solana-core",
+      "agave-pq-crypto",
+      "solana-ledger",
+      "solana-tls-utils"
+    ],
+    "nightly_rustfmt_check_files": 8,
+    "release_locked_build": true,
+    "features": [
+      "agave-unstable-api"
+    ],
+    "binaries": {
+      "agave-validator": {
+        "bytes": 85724832,
+        "sha384": "fe2c0f4134319e8a7c9e3c3a39addacd67140594a6744b5c1c2bf76015d1477a427259ae73e73d3dbea7eb72efca9b32",
+        "dynamic_dependencies_sha384": "a42c9230ca1ca3fa5c5f6a072a3c1471817612f045fc11321eda77c3e143342e83beaf7827734c18f3a0e85a64fffb81"
+      },
+      "agave-pq-tool": {
+        "bytes": 23990640,
+        "sha384": "48480d28d217579bdd4aa19e83acdd38503fa327bb33cc0bca1bbdc612967060699df094587146784e88d35d3d3cba98",
+        "dynamic_dependencies_sha384": "fb09fb5674b03cf49514b0803a16957f6cfa76f197b20ab70d1fab501c2259dc17f317beb7769b45f694234d0c46af03"
+      }
+    },
+    "actual_R_native_genesis_compatibility_passed": true
+  },
+  "microbenchmarks": {
+    "raw_storage_SHA384": {
+      "benchmark": "raw-storage-sha384-total",
+      "iterations_per_backend_per_trial": 20,
+      "openssl_thread_cpu_ns": 1192923117,
+      "openssl_wall_ns": 1191799728,
+      "payload_bytes": 13476746,
+      "qualification": "Raw journal-sized byte hashing from cloned common-domain prefixes only. Linux thread CPU uses schedstat runtime; timing excludes data generation, digest comparisons and database/fsync/signing/native execution. No cluster TPS or signature-verification gain is inferred.",
+      "rust_over_openssl_thread_cpu_ratio": 2.723302873172505,
+      "rust_over_openssl_wall_ratio": 2.726810615617123,
+      "rust_sha2_thread_cpu_ns": 3248690952,
+      "rust_sha2_wall_ns": 3249812150,
+      "trials": 4
+    },
+    "canonical_encoding_warm_repeat": {
+      "benchmark": "canonical-signature-repeat-total",
+      "cached_thread_cpu_ns": 27999318,
+      "cached_wall_ns": 26466479,
+      "iterations_per_path_per_trial": 20000,
+      "qualification": "Warm exact-repeat public canonical parsing only, including returned signature copies. Linux schedstat thread CPU. No authentication/verification, network, persistence or native-execution work is skipped; no fleet TPS inference.",
+      "scalar_over_cached_thread_cpu_ratio": 4.357117019778839,
+      "scalar_over_cached_wall_ratio": 4.654125960616068,
+      "scalar_thread_cpu_ns": 121996305,
+      "scalar_wall_ns": 123178327,
+      "trials": 4
+    },
+    "canonical_encoding_alternating_miss": {
+      "benchmark": "canonical-signature-alternating-miss-total",
+      "cached_miss_over_scalar_thread_cpu_ratio": 1.024198176259015,
+      "cached_miss_over_scalar_wall_ratio": 1.0250686708765349,
+      "cached_thread_cpu_ns": 126998506,
+      "cached_wall_ns": 127157944,
+      "iterations_per_path_per_trial": 20000,
+      "qualification": "Alternating two genuine canonical public signatures, forcing one-entry cache miss each call; both paths use identical input order. Cached miss path includes cfg(test) scalar-call counter bookkeeping, absent in production and baseline. Wall/schedstat CPU exclude signature generation, verification and full666 output checks. No speed assertions or fleet TPS/hit-rate inference.",
+      "scalar_thread_cpu_ns": 123997981,
+      "scalar_wall_ns": 124048220,
+      "trials": 4
+    }
+  },
+  "checks": [
+    {
+      "name": "format-second",
+      "passed": true,
+      "receipt_sha384": "621197f8c431fd4fb17a5bf379ec50c443fe43f7eef0f916efc2191099b7247e7f8f77457be7c7cd193ef3b3c17f46ae",
+      "log_sha384": "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
+      "wall_seconds": 0.8896746188402176
+    },
+    {
+      "name": "strict-second",
+      "passed": true,
+      "receipt_sha384": "e17ca51f18ab5bd91ae56b35075da5ddd55511a003e5f395bedad106ce8255b7f9e320fe31276587bed32fb33bfb8807",
+      "log_sha384": "00f0ee2b09c59392abcb4c204c0edcd5bf161eb7557d24eb7e257d3080e4b7c37a9c21ab93e34fb1964e70408e65357a",
+      "wall_seconds": 31.27961801737547
+    },
+    {
+      "name": "crypto-all-primitives-second",
+      "passed": true,
+      "receipt_sha384": "f945a56a8d10e7de4cf5a82631d123d6f488a0c3b22851d87d68ea822b800a455c3d69b4623b2898842e1b093eb02031",
+      "log_sha384": "d634cbb99ad8b170463c888dbbea9ad7145f70a892531d58d8022dc983f010aca9ce908012ccd1c0e3bebb3d62e924b3",
+      "wall_seconds": 19.664235077798367
+    },
+    {
+      "name": "full-core-second",
+      "passed": true,
+      "receipt_sha384": "d6a47c2572fa8e65fe7dd2d7e60a14d54eee234de760ac8a0c2c899cb476daf858de713bf015b46d508cadbca966b6d1",
+      "log_sha384": "2194bd5ac5cc0706cf3e8fb1fc020b5f6abb5c06367dea02a3c4311603cdde7b8dd207f7c099a5696eabdb7c4f1729fb",
+      "wall_seconds": 228.42229505628347
+    },
+    {
+      "name": "crypto-consensus-second",
+      "passed": true,
+      "receipt_sha384": "ceff479177e605cf0e544aba532b52d0e9754038d7149464b531b7c892a9c3a3d4f68c35524e8539e1fa431dfc73f46c",
+      "log_sha384": "e677777a2591b5e919fe54cace263179f2ad888a5f7a869019b2ab48b6a4d498f4fb6b5e8062a7c9a5efd567d60b0a4d",
+      "wall_seconds": 11.654465347528458
+    },
+    {
+      "name": "crypto-quantumglow-second",
+      "passed": true,
+      "receipt_sha384": "5d17a7a3d56c8f63e5ce525b5f8024d333949688bff06c83636fcff2301a106ea642b2c0ee00d6ac5849873bb5d1c5cf",
+      "log_sha384": "b34c2a4c0f777ce30843df3d3305dc862fc93cf298fc64afa961e82a9fe2914c069302b32afece7f0a0baa0ce242066f",
+      "wall_seconds": 133.38634872436523
+    },
+    {
+      "name": "crypto-network-second",
+      "passed": true,
+      "receipt_sha384": "7c722296c42876aee72680fe8d2b0272ad18e291aada714017428a0865f84edcafba94e7845bda3ef48523a812132d6b",
+      "log_sha384": "1f5e5242817cc9892e79c81929fc5b90f9072ff6b3fa162b3cb3eba51559a553a9ac0c75266af3eba467174d14bbc53a",
+      "wall_seconds": 70.18966270238161
+    },
+    {
+      "name": "ledger-tls-second",
+      "passed": true,
+      "receipt_sha384": "979e13107d3cd4e8e9354440794a2aa42679018143ab5471f97249f2b36ef2e9acdb27d14928aeec032dfda25c82d835",
+      "log_sha384": "64147ac5effaa64a6d2eb59248bc7f7c99314346c40cf6b9b9cb77f4dfa40b42b72ac284c3a75a06c56b953bddd4781e",
+      "wall_seconds": 40.293091878294945
+    },
+    {
+      "name": "release-build-second",
+      "passed": true,
+      "receipt_sha384": "a03318709e55171d2dbedcd66ca4472cdecf6f7342656f22533a68d1e074b58224b67f8e32b6cd3a16f16bc0c76b4116",
+      "log_sha384": "e5f16248c0538679b113d420e7a7e767012459657e3e08f59a3d375fde14d3a6441939216ecbfc89eb37b19a91fe34c0",
+      "wall_seconds": 102.98005939275026
+    },
+    {
+      "name": "release-hash-benchmark-first",
+      "passed": true,
+      "receipt_sha384": "6c0a066e3998d73ec4d89cdaf44e6a4892c48dacad0103ca47f889d8de0044b4362e0a39ea479076caec46ec4d2bef44",
+      "log_sha384": "86ef302ef0c677b6c25698aaca47f31a5ad21da75f50dde716658d4f8053b900ddc89e3bc0aa383fee2963cf864b7541",
+      "wall_seconds": 4.894913382828236
+    },
+    {
+      "name": "release-cache-benchmarks-third",
+      "passed": true,
+      "receipt_sha384": "7f26199a326cd3a7d65b93fdeaeb5ac80214c534867762aeae8d2d40249f30563652fa24f209fcbe294dde43ded128c2",
+      "log_sha384": "76b8accca4ae85482a3917ae01380712f267e07071fd9bdd549a305328cb5c2ff1d3ba7cd0c14dc33c57d34c88f75f4c",
+      "wall_seconds": 10.502472549676895
+    },
+    {
+      "name": "actual-R-genesis-second",
+      "passed": true,
+      "receipt_sha384": "60852d741b5150f858018491b16a3277cd657ff4ee85de657be47ed36b61345cc5a5eda2dc1953794b1bcdcf38c893c0",
+      "log_sha384": "c62422ce1026bf8b648a437d93d5493642ab2396ab9f512dc7756cc3cf8e6375f771989e7860d3ae1c638f8598b275c3",
+      "wall_seconds": 1.8489284738898277
+    }
+  ],
+  "provenance_sha384": {
+    "build_manifest": "6934f1d038ffb82ff9363b3fc5997e003a5bd3ac1ebc7ed5643af341ddce40ae4efc3c6dc1281522ec97ced529114d09",
+    "completed_validation": "518e636c236344f68234352318c9f0e1ce9bf140a17a618ce2ea3c5737e4d43b405587ccccc60d343f43473343889337",
+    "distinct_census": "86ab0818790702debfa44c5bd1928beafcf9ebb4cfd193c787270d144e7f0857b341bc232fd83d768aa1a1bf719ec404",
+    "independent_final_build_review": "8ac83efe9c7bc14310fb858bc124eb065a9fe976bb5f6b86039deb36f7b0ada7b73af30d67ee1fd99c89a0e2000472c3",
+    "actual_R_genesis_provenance": "0db1d136cd813fc1eae17ed618a1bd5d37232b3a0542ad7512faacdc2dc7418ac65521296cb758a8c783a40fdda12053"
+  },
+  "qualifications": [
+    "216 unique functional tests are separate from three explicitly executed ignored release microbenchmarks; one network-finality test appears in both QG/network suite filters and is counted once.",
+    "The native-genesis compatibility function is normally ignored in the full Core filter but was actually run with the fresh R manifest and wallet33-first matching token view. It is already included in216.",
+    "Receipt names ending first/second are inherited labels: all successful checks bind the exact final THIRD79-file source manifest. The final formatting/integration deltas were test-only; production cache behavior is the reviewed implementation.",
+    "Raw storage hashing clones common-domain prefixes and compares independent Rust sha2 full48-byte outputs outside timers. It excludes data generation, database/write_sync/fsync, signing and native execution.",
+    "Canonical-parser warm and forced-miss measurements exclude signature generation, verification and full666 output checks. Returned copies remain included; forced misses include a cfg(test) scalar-call counter absent in production and baseline.",
+    "The cache timing spans are short and schedstat CPU has finite resolution. Alternating two signatures intentionally forces misses; no production hit-rate or unique-transaction overhead is established.",
+    "No microbenchmark establishes cluster TPS, whole-validator efficiency, signature-verification acceleration or runtime acceptance.",
+    "All old/failing receipts and prior source snapshots remain preserved. This report stages new files only."
+  ]
+}

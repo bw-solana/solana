@@ -195,6 +195,7 @@ impl Rocks {
             new_cf_descriptor::<columns::AlternateShredData>(options, oldest_slot),
             new_cf_descriptor::<columns::AlternateMerkleRootMeta>(options, oldest_slot),
             new_cf_descriptor::<columns::DoubleMerkleMeta>(options, oldest_slot),
+            new_cf_descriptor::<columns::ExperimentalPq>(options, oldest_slot),
         ];
 
         // When remaining columns are optional we can just return immediately here.
@@ -239,7 +240,7 @@ impl Rocks {
         cf_descriptors
     }
 
-    const fn columns() -> [&'static str; 24] {
+    const fn columns() -> [&'static str; 25] {
         [
             columns::ErasureMeta::NAME,
             columns::DeadSlots::NAME,
@@ -265,6 +266,7 @@ impl Rocks {
             columns::AlternateShredData::NAME,
             columns::AlternateMerkleRootMeta::NAME,
             columns::DoubleMerkleMeta::NAME,
+            columns::ExperimentalPq::NAME,
         ]
     }
 
@@ -412,7 +414,6 @@ impl Rocks {
         self.db.iterator_cf(cf, iterator_mode)
     }
 
-    #[cfg(test)]
     pub(crate) fn raw_iterator_cf(&self, cf: &ColumnFamily) -> Result<rocksdb::DBRawIterator<'_>> {
         Ok(self.db.raw_iterator_cf(cf))
     }
@@ -447,6 +448,16 @@ impl Rocks {
     pub(crate) fn is_primary_access(&self) -> bool {
         self.access_type == AccessType::Primary
             || self.access_type == AccessType::PrimaryForMaintenance
+    }
+
+    /// PQ vote release and finalization must not become visible before their
+    /// recovery witness has reached the RocksDB WAL on stable storage.
+    pub(crate) fn write_sync<B: AsMut<WriteBatch>>(&self, mut batch: B) -> Result<()> {
+        let mut options = rocksdb::WriteOptions::default();
+        options.set_sync(true);
+        self.db
+            .write_opt(&mut batch.as_mut().write_batch, &options)
+            .map_err(BlockstoreError::RocksDb)
     }
 
     /// Retrieves the specified RocksDB integer property of the current

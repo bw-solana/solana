@@ -70,6 +70,48 @@ impl<T: Clone> Default for StatusCache<T> {
 }
 
 impl<T: Clone> StatusCache<T> {
+    /// Post-cutoff private execution uses the independent full-width PQ replay
+    /// cache and cannot admit classical transactions. Retain visibility roots,
+    /// while avoiding a deep copy of classical telemetry and snapshot deltas.
+    pub(crate) fn clone_roots_for_pq_branch(&self, ancestors: &Ancestors) -> Self {
+        let parent_slot = ancestors.max_slot();
+        Self {
+            cache: HashMap::default(),
+            roots: self
+                .roots
+                .iter()
+                .copied()
+                .filter(|slot| *slot <= parent_slot)
+                .collect(),
+            max_root_entries: self.max_root_entries,
+            slot_deltas: HashMap::default(),
+        }
+    }
+
+    /// Isolate both replay lookup state and snapshot slot-delta maps. Ordinary
+    /// `Clone` intentionally shares delta Arcs, which is unsuitable for several
+    /// speculative PQ candidates with the same protocol slot.
+    pub(crate) fn clone_for_pq_branch(&self, ancestors: &Ancestors) -> Self {
+        let mut cloned = self.clone();
+        let parent_slot = ancestors.max_slot();
+        cloned.roots.retain(|slot| *slot <= parent_slot);
+        let visible = |slot: &Slot| {
+            (self.roots.contains(slot) && *slot <= parent_slot) || ancestors.contains_key(slot)
+        };
+        for (_, _, keys) in cloned.cache.values_mut() {
+            for statuses in keys.values_mut() {
+                statuses.retain(|(slot, _)| visible(slot));
+            }
+            keys.retain(|_, statuses| !statuses.is_empty());
+        }
+        cloned.cache.retain(|_, (_, _, keys)| !keys.is_empty());
+        cloned.slot_deltas.retain(|slot, _| visible(slot));
+        for delta in cloned.slot_deltas.values_mut() {
+            let owned = delta.lock().unwrap().clone();
+            *delta = Arc::new(Mutex::new(owned));
+        }
+        cloned
+    }
     /// Clear all entries for a slot.
     ///
     /// This is used when a slot is purged from the cache, see

@@ -45,6 +45,27 @@ const MIN_LOOP_INTERVAL: Duration = Duration::from_millis(100);
 const CLEAN_INTERVAL: Duration = Duration::from_secs(60);
 const SHRINK_INTERVAL: Duration = Duration::from_secs(1);
 
+// The caller supplies the actual canonical root and preserves the snapshot
+// clean barrier. Speculative Bank drop/scan operations must use their local DB.
+fn maintain_root_accounts(
+    bank: &Bank,
+    max_clean_slot_inclusive: Slot,
+    should_clean: bool,
+    should_shrink: bool,
+) {
+    let accounts_db = bank.rc.accounts.accounts_db.pq_storage_db();
+    accounts_db.flush_accounts_cache(should_clean, Some(max_clean_slot_inclusive));
+    if should_clean {
+        accounts_db.clean_accounts(max_clean_slot_inclusive);
+    }
+    if should_shrink || should_clean {
+        if should_clean {
+            bank.shrink_ancient_slots();
+        }
+        bank.shrink_candidate_slots();
+    }
+}
+
 pub type SnapshotRequestSender = Sender<SnapshotRequest>;
 pub type SnapshotRequestReceiver = Receiver<SnapshotRequest>;
 pub type DroppedSlotsSender = Sender<(Slot, BankId)>;
@@ -233,16 +254,13 @@ impl SnapshotRequestHandler {
             request_kind: _,
             enqueued: _,
         } = snapshot_request;
+        let accounts_db = snapshot_root_bank.rc.accounts.accounts_db.pq_storage_db();
 
         if snapshot_kind.is_full_snapshot() {
             // The latest full snapshot slot is what accounts-db uses to properly handle
             // zero lamport accounts.  We are handling a full snapshot request here, and
             // since taking a snapshot is not allowed to fail, we can update accounts-db now.
-            snapshot_root_bank
-                .rc
-                .accounts
-                .accounts_db
-                .set_latest_full_snapshot_slot(snapshot_root_bank.slot());
+            accounts_db.set_latest_full_snapshot_slot(snapshot_root_bank.slot());
         }
 
         let mut flush_accounts_cache_time = Measure::start("flush_accounts_cache_time");
@@ -256,10 +274,7 @@ impl SnapshotRequestHandler {
         // `> MAX_CACHE_SLOT` cached and rooted slots which triggered earlier flushes.
         assert!(
             snapshot_root_bank.slot()
-                <= snapshot_root_bank
-                    .rc
-                    .accounts
-                    .accounts_db
+                <= accounts_db
                     .accounts_cache
                     .fetch_max_flush_root()
                     .expect("Roots have been flushed")
@@ -270,7 +285,8 @@ impl SnapshotRequestHandler {
         snapshot_root_bank.clean_accounts();
         clean_time.stop();
 
-        let (_, shrink_ancient_time_us) = measure_us!(snapshot_root_bank.shrink_ancient_slots());
+        let (_, shrink_ancient_time_us) =
+            measure_us!(accounts_db.shrink_ancient_slots(snapshot_root_bank.epoch_schedule()));
 
         let mut shrink_time = Measure::start("shrink_time");
         snapshot_root_bank.shrink_candidate_slots();
@@ -364,7 +380,9 @@ impl PrunedBanksRequestHandler {
         }
 
         // Banks for the same slot are purged sequentially
-        let accounts_db = bank.rc.accounts.accounts_db.as_ref();
+        // This queue contains native startup Bank callbacks. Private PQ
+        // candidates install their own local callback and never enter it.
+        let accounts_db = bank.rc.accounts.accounts_db.pq_storage_db();
         grouped_banks_to_purge.into_iter().for_each(|group| {
             group.iter().for_each(|(slot, bank_id)| {
                 accounts_db.purge_slot(*slot, *bank_id, true);
@@ -442,7 +460,11 @@ impl AccountsBackgroundService {
                     let mut previous_shrink_time = Instant::now();
 
                     let bank = bank_forks.read().unwrap().root_bank();
-                    bank.rc.accounts.accounts_db.finish_startup();
+                    bank.rc
+                        .accounts
+                        .accounts_db
+                        .pq_storage_db()
+                        .finish_startup();
 
                     loop {
                         if exit.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
@@ -538,33 +560,19 @@ impl AccountsBackgroundService {
                             let duration_since_previous_clean = previous_clean_time.elapsed();
                             let should_clean = duration_since_previous_clean > CLEAN_INTERVAL;
 
-                            // if we're cleaning, then force flush, otherwise be lazy
-                            let force_flush = should_clean;
-                            bank.rc
-                                .accounts
-                                .accounts_db
-                                .flush_accounts_cache(force_flush, Some(max_clean_slot_inclusive));
-
+                            let duration_since_previous_shrink = previous_shrink_time.elapsed();
+                            let should_shrink = duration_since_previous_shrink > SHRINK_INTERVAL;
+                            maintain_root_accounts(
+                                &bank,
+                                max_clean_slot_inclusive,
+                                should_clean,
+                                should_shrink,
+                            );
                             if should_clean {
-                                bank.rc
-                                    .accounts
-                                    .accounts_db
-                                    .clean_accounts(max_clean_slot_inclusive);
                                 last_cleaned_slot = max_clean_slot_inclusive;
                                 previous_clean_time = Instant::now();
                             }
-
-                            let duration_since_previous_shrink = previous_shrink_time.elapsed();
-                            let should_shrink = duration_since_previous_shrink > SHRINK_INTERVAL;
-                            // To avoid pathological interactions between the clean and shrink
-                            // timers, call shrink for either should_shrink or should_clean.
                             if should_shrink || should_clean {
-                                if should_clean {
-                                    // We used to only squash (aka shrink ancients) when we also
-                                    // cleaned, so keep that same behavior here for now.
-                                    bank.shrink_ancient_slots();
-                                }
-                                bank.shrink_candidate_slots();
                                 previous_shrink_time = Instant::now();
                             }
                         }
@@ -602,6 +610,7 @@ impl AccountsBackgroundService {
                 .rc
                 .accounts
                 .accounts_db
+                .pq_storage_db()
                 .enable_bank_drop_callback();
             root_bank.set_callback(Some(Box::new(SendDroppedBankCallback::new(
                 pruned_banks_sender,
@@ -660,6 +669,7 @@ fn new_snapshot_kind(snapshot_request: &SnapshotRequest) -> Option<SnapshotKind>
                 .rc
                 .accounts
                 .accounts_db
+                .pq_storage_db()
                 .latest_full_snapshot_slot()
             {
                 Some(SnapshotKind::Archive(SnapshotArchiveKind::Incremental(
@@ -725,11 +735,593 @@ fn cmp_snapshot_request_kinds_by_priority(
 #[cfg(test)]
 mod test {
     use {
-        super::*, crate::genesis_utils::create_genesis_config,
-        agave_snapshots::snapshot_config::SnapshotConfig, crossbeam_channel::bounded,
-        solana_account::AccountSharedData, solana_epoch_schedule::EpochSchedule,
-        solana_leader_schedule::SlotLeader, solana_pubkey::Pubkey,
+        super::*,
+        crate::genesis_utils::{create_genesis_config, create_genesis_config_with_leader},
+        agave_pq_crypto::{
+            auth::{AuthRecord, Origin},
+            crypto::FalconKeypair,
+        },
+        agave_snapshots::snapshot_config::SnapshotConfig,
+        crossbeam_channel::bounded,
+        solana_account::{Account, AccountSharedData, ReadableAccount, WritableAccount},
+        solana_epoch_schedule::EpochSchedule,
+        solana_fee_calculator::FeeRateGovernor,
+        solana_hash::Hash,
+        solana_keypair::Keypair,
+        solana_leader_schedule::SlotLeader,
+        solana_message::{Message, VersionedMessage},
+        solana_pubkey::Pubkey,
+        solana_signer::Signer,
+        solana_system_interface::instruction as system_instruction,
+        solana_transaction::versioned::VersionedTransaction,
+        solana_transaction_error::TransactionError,
     };
+
+    type MaintenanceFixture = (
+        Arc<Bank>,
+        Arc<RwLock<BankForks>>,
+        Keypair,
+        FalconKeypair,
+        crate::pq::Config,
+    );
+
+    fn pq_maintenance_bank() -> MaintenanceFixture {
+        let mut genesis =
+            create_genesis_config_with_leader(10_000_000_000, &Pubkey::new_unique(), 1_000_000_000);
+        genesis.genesis_config.rent = solana_rent::Rent::default();
+        genesis.genesis_config.fee_rate_governor = FeeRateGovernor::new(5_000, 0);
+        let config = crate::pq::Config {
+            chain_id: [0x53; 32],
+            migration_context: [0x57; 32],
+            cutoff_slot: 0,
+        };
+        genesis.genesis_config.accounts.insert(
+            crate::pq::CONFIG_ADDRESS,
+            config.account(genesis.genesis_config.rent.minimum_balance(80)),
+        );
+        let key = FalconKeypair::generate();
+        let policy = AuthRecord::new(
+            genesis.mint_keypair.pubkey().to_bytes(),
+            key.public_key(),
+            Origin::FreshIdentity,
+        )
+        .encode();
+        genesis.genesis_config.accounts.insert(
+            crate::pq::policy_address(&genesis.mint_keypair.pubkey()),
+            Account {
+                lamports: genesis.genesis_config.rent.minimum_balance(policy.len()),
+                data: policy,
+                owner: crate::pq::PROGRAM_ID,
+                executable: false,
+                rent_epoch: u64::MAX,
+            },
+        );
+        let (bank, forks) =
+            Bank::new_for_tests(&genesis.genesis_config).wrap_with_bank_forks_for_tests();
+        (bank, forks, genesis.mint_keypair, key, config)
+    }
+
+    fn pq_maintenance_transfer(
+        bank: &Bank,
+        authority: Pubkey,
+        key: &FalconKeypair,
+        config: &crate::pq::Config,
+        recipient: Pubkey,
+        amount: u64,
+    ) -> VersionedTransaction {
+        crate::pq::sign_transaction(
+            VersionedMessage::Legacy(Message::new_with_blockhash(
+                &[
+                    crate::pq::authenticate_instruction(&[authority]),
+                    system_instruction::transfer(&authority, &recipient, amount),
+                ],
+                Some(&authority),
+                &bank.last_blockhash(),
+            )),
+            config,
+            &[key],
+        )
+        .unwrap()
+    }
+
+    fn recompute_pq_accounts(bank: &Bank) -> [u8; 48] {
+        let mut leaves = Vec::new();
+        bank.rc
+            .accounts
+            .scan_all(&bank.ancestors, bank.bank_id(), |entry| {
+                if let Some((address, account, _)) = entry
+                    && account.lamports() != 0
+                {
+                    leaves.push((*address, crate::pq::account_leaf(address, &account)));
+                }
+            })
+            .unwrap();
+        crate::pq::accounts_merkle_root(leaves)
+    }
+
+    #[test]
+    fn test_pq_root_background_maintenance_bounds_original_cache_and_keeps_snapshots() {
+        let (initial, forks, authority, key, config) = pq_maintenance_bank();
+        let recipient = Pubkey::new_unique();
+        initial.store_account(
+            &recipient,
+            &AccountSharedData::new(1_000_000, 0, &solana_sdk_ids::system_program::id()),
+        );
+        let changed = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let inherited = Pubkey::new_unique();
+        let inherited_account = AccountSharedData::from(Account {
+            lamports: 1_000_000_000,
+            data: vec![0x91; 2048],
+            owner,
+            executable: false,
+            rent_epoch: 79,
+        });
+        initial.store_account(&inherited, &inherited_account);
+        initial.store_account(
+            &changed,
+            &AccountSharedData::from(Account {
+                lamports: 1_000_000_000,
+                data: vec![0; 65536],
+                owner,
+                executable: false,
+                rent_epoch: 31,
+            }),
+        );
+        initial.freeze();
+        initial.squash();
+        initial.force_flush_accounts_cache();
+        let storage = initial.rc.accounts.accounts_db.pq_storage_db();
+        assert_eq!(storage.accounts_cache.num_slots(), 0);
+        let leader = *initial.leader();
+        let initial_authority_balance = initial.get_balance(&authority.pubkey());
+        let mut successful = Vec::new();
+        let mut charged_failure = None;
+        let mut sibling = None;
+        let mut frozen_descendant = None;
+        let mut peaks = Vec::new();
+        for slot in 1u64..=16 {
+            let parent = forks.read().unwrap().root_bank();
+            let child =
+                Arc::new(Bank::new_isolated_pq_child(Arc::clone(&parent), leader, slot).unwrap());
+            let wire =
+                pq_maintenance_transfer(&child, authority.pubkey(), &key, &config, recipient, slot);
+            let identity = crate::pq::transaction_intent_identity(&wire, &config.chain_id).unwrap();
+            assert_eq!(
+                child
+                    .process_transaction_with_metadata(wire.clone())
+                    .unwrap()
+                    .status,
+                Ok(())
+            );
+            successful.push((identity, wire));
+            if slot == 5 {
+                let failed = pq_maintenance_transfer(
+                    &child,
+                    authority.pubkey(),
+                    &key,
+                    &config,
+                    recipient,
+                    u64::MAX,
+                );
+                let failed_identity =
+                    crate::pq::transaction_intent_identity(&failed, &config.chain_id).unwrap();
+                let before = child.get_balance(&authority.pubkey());
+                assert!(
+                    child
+                        .process_transaction_with_metadata(failed.clone())
+                        .unwrap()
+                        .status
+                        .is_err()
+                );
+                assert_eq!(child.get_balance(&authority.pubkey()), before - 5_000);
+                charged_failure = Some((failed_identity, failed));
+            }
+            let mut account = child.get_account(&changed).unwrap();
+            account.set_data_from_slice(&vec![slot as u8; 65536]);
+            account.set_rent_epoch(slot + 31);
+            child.store_account(&changed, &account);
+            if slot == 3 {
+                let alternative = Arc::new(
+                    Bank::new_isolated_pq_child(Arc::clone(&parent), leader, slot).unwrap(),
+                );
+                let wire = pq_maintenance_transfer(
+                    &alternative,
+                    authority.pubkey(),
+                    &key,
+                    &config,
+                    recipient,
+                    999,
+                );
+                let identity =
+                    crate::pq::transaction_intent_identity(&wire, &config.chain_id).unwrap();
+                assert_eq!(
+                    alternative
+                        .process_transaction_with_metadata(wire)
+                        .unwrap()
+                        .status,
+                    Ok(())
+                );
+                alternative.freeze();
+                alternative.detach_isolated_pq_parent().unwrap();
+                sibling = Some((
+                    Arc::clone(&alternative),
+                    alternative.pq_state_commitment(),
+                    identity,
+                ));
+            }
+            let mut hash = [0x84; 32];
+            hash[..8].copy_from_slice(&slot.to_le_bytes());
+            child.register_recent_blockhash_for_test(&Hash::new_from_array(hash), None);
+            child.freeze();
+            child.detach_isolated_pq_parent().unwrap();
+            if slot == 3 {
+                // This descendant executes before its own parent is certified.
+                // Later canonical flush/clean must preserve its private view.
+                let descendant =
+                    Arc::new(Bank::new_isolated_pq_child(Arc::clone(&child), leader, 4).unwrap());
+                let wire = pq_maintenance_transfer(
+                    &descendant,
+                    authority.pubkey(),
+                    &key,
+                    &config,
+                    recipient,
+                    777,
+                );
+                let identity =
+                    crate::pq::transaction_intent_identity(&wire, &config.chain_id).unwrap();
+                assert_eq!(
+                    descendant
+                        .process_transaction_with_metadata(wire)
+                        .unwrap()
+                        .status,
+                    Ok(())
+                );
+                descendant.freeze();
+                descendant.detach_isolated_pq_parent().unwrap();
+                let state = descendant.pq_state_commitment();
+                frozen_descendant = Some((descendant, state, identity, account.clone()));
+            }
+            let state = child.pq_state_commitment();
+            let accounts_root = recompute_pq_accounts(&child);
+            let promoted = forks
+                .write()
+                .unwrap()
+                .promote_pq_candidate(Arc::clone(&child), parent.pq_state_commitment())
+                .unwrap();
+            assert!(Arc::ptr_eq(&promoted, &child));
+            let before = (
+                storage.accounts_cache.num_slots(),
+                storage.accounts_cache.num_unflushed_roots(),
+                storage.accounts_cache.size(),
+            );
+            let observed = promoted.pq_persisted_accounts_cache_stats();
+            assert_eq!(
+                (
+                    observed.slots,
+                    observed.unflushed_roots,
+                    observed.data_bytes
+                ),
+                before
+            );
+            maintain_root_accounts(&promoted, slot - 1, true, true);
+            let after = (
+                storage.accounts_cache.num_slots(),
+                storage.accounts_cache.num_unflushed_roots(),
+                storage.accounts_cache.size(),
+            );
+            eprintln!(
+                "PQ root maintenance slot={slot} original_cache_before={before:?} \
+                 original_cache_after={after:?}"
+            );
+            peaks.push(after);
+            assert_eq!(promoted.pq_state_commitment(), state);
+            assert_eq!(promoted.pq_accounts_commitment(), accounts_root);
+            assert_eq!(recompute_pq_accounts(&promoted), accounts_root);
+            assert_eq!(promoted.get_account(&inherited).unwrap(), inherited_account);
+            assert_eq!(promoted.get_account(&changed).unwrap(), account);
+            for (identity, _) in &successful {
+                assert!(promoted.pq_intent_processed(identity).unwrap());
+            }
+            if let Some((identity, _)) = &charged_failure {
+                assert!(promoted.pq_intent_processed(identity).unwrap());
+            }
+            if let Some((alternative, state, identity)) = &sibling {
+                assert_eq!(alternative.pq_state_commitment(), *state);
+                assert_eq!(
+                    alternative.pq_accounts_commitment(),
+                    recompute_pq_accounts(alternative)
+                );
+                assert!(alternative.pq_intent_processed(identity).unwrap());
+                assert!(!promoted.pq_intent_processed(identity).unwrap());
+                assert_eq!(
+                    alternative.get_account(&inherited).unwrap(),
+                    inherited_account
+                );
+            }
+            if let Some((descendant, state, identity, account)) = &frozen_descendant {
+                assert_eq!(descendant.pq_state_commitment(), *state);
+                assert_eq!(
+                    descendant.pq_accounts_commitment(),
+                    recompute_pq_accounts(descendant)
+                );
+                assert_eq!(descendant.get_account(&changed).unwrap(), *account);
+                assert_eq!(
+                    descendant.get_account(&inherited).unwrap(),
+                    inherited_account
+                );
+                assert_eq!(descendant.get_balance(&recipient), 1_000_000 + 6 + 777);
+                assert!(descendant.pq_intent_processed(identity).unwrap());
+                assert!(!promoted.pq_intent_processed(identity).unwrap());
+            }
+        }
+        let root = forks.read().unwrap().root_bank();
+        assert_eq!(
+            root.get_balance(&recipient),
+            1_000_000 + (1..=16u64).sum::<u64>()
+        );
+        assert_eq!(
+            root.get_balance(&authority.pubkey()),
+            initial_authority_balance - (1..=16u64).sum::<u64>() - 17 * 5_000
+        );
+        assert_eq!(root.transaction_count(), initial.transaction_count() + 17);
+        let probe = Bank::new_isolated_pq_child(Arc::clone(&root), leader, 17).unwrap();
+        for (_, wire) in successful.iter().take(1).chain(charged_failure.iter()) {
+            assert_eq!(
+                probe
+                    .process_transaction_with_metadata(wire.clone())
+                    .unwrap_err(),
+                TransactionError::AlreadyProcessed
+            );
+        }
+        let (alternative, state, _) = sibling.unwrap();
+        assert!(
+            forks
+                .write()
+                .unwrap()
+                .promote_pq_candidate(Arc::clone(&alternative), root.pq_state_commitment())
+                .is_err()
+        );
+        drop(alternative);
+        assert_eq!(root.pq_accounts_commitment(), recompute_pq_accounts(&root));
+        assert!(state != root.pq_state_commitment());
+        assert!(
+            peaks
+                .iter()
+                .all(|(slots, roots, _)| *slots <= 1 && *roots <= 1),
+            "rooted original versions must be drained by actual ABS maintenance: {peaks:?}"
+        );
+    }
+
+    #[test]
+    fn test_pq_background_original_dead_slots_and_private_sibling_drops_stay_separate() {
+        let (initial, forks, authority, key, config) = pq_maintenance_bank();
+        let receiver = AccountsBackgroundService::setup_bank_drop_callback(Arc::clone(&forks));
+        initial.freeze();
+        initial.squash();
+        let storage = initial.rc.accounts.accounts_db.pq_storage_db();
+        let dead = Bank::new_from_parent(Arc::clone(&initial), *initial.leader(), 1);
+        let dead_address = Pubkey::new_unique();
+        dead.store_account(
+            &dead_address,
+            &AccountSharedData::new(1_000_000, 0, &solana_sdk_ids::system_program::id()),
+        );
+        assert!(storage.accounts_cache.slot_cache(1).is_some());
+        drop(dead);
+        assert_eq!(receiver.len(), 1);
+        let canonical = Arc::new(
+            Bank::new_isolated_pq_child(Arc::clone(&initial), *initial.leader(), 2).unwrap(),
+        );
+        let recipient = Pubkey::new_unique();
+        let wire = pq_maintenance_transfer(
+            &canonical,
+            authority.pubkey(),
+            &key,
+            &config,
+            recipient,
+            1_000_000,
+        );
+        assert_eq!(
+            canonical
+                .process_transaction_with_metadata(wire)
+                .unwrap()
+                .status,
+            Ok(())
+        );
+        canonical.freeze();
+        canonical.detach_isolated_pq_parent().unwrap();
+        let private = Arc::new(
+            Bank::new_isolated_pq_child(Arc::clone(&initial), *initial.leader(), 2).unwrap(),
+        );
+        let wire = pq_maintenance_transfer(
+            &private,
+            authority.pubkey(),
+            &key,
+            &config,
+            Pubkey::new_unique(),
+            1_000_000,
+        );
+        assert_eq!(
+            private
+                .process_transaction_with_metadata(wire)
+                .unwrap()
+                .status,
+            Ok(())
+        );
+        private.freeze();
+        private.detach_isolated_pq_parent().unwrap();
+        let private_db = Arc::clone(&private.rc.accounts.accounts_db);
+        let state = canonical.pq_state_commitment();
+        forks
+            .write()
+            .unwrap()
+            .promote_pq_candidate(Arc::clone(&canonical), initial.pq_state_commitment())
+            .unwrap();
+        drop(private);
+        assert_eq!(
+            receiver.len(),
+            1,
+            "private speculative drop must not enter original ABS queue"
+        );
+        assert!(private_db.accounts_cache.slot_cache(2).is_none());
+        assert!(storage.accounts_cache.slot_cache(2).is_some());
+        let handler = PrunedBanksRequestHandler {
+            pruned_banks_receiver: receiver,
+        };
+        handler.remove_dead_slots(&canonical, &mut 0, &mut 0);
+        assert!(
+            storage.accounts_cache.slot_cache(1).is_none(),
+            "original startup-bank drop must purge original storage"
+        );
+        assert!(storage.accounts_cache.slot_cache(2).is_some());
+        assert_eq!(canonical.pq_state_commitment(), state);
+        assert_eq!(
+            canonical.pq_accounts_commitment(),
+            recompute_pq_accounts(&canonical)
+        );
+        assert_eq!(canonical.get_balance(&recipient), 1_000_000);
+    }
+
+    #[test]
+    fn test_native_root_background_maintenance_retains_original_non_pq_behavior() {
+        let mut genesis =
+            create_genesis_config_with_leader(10_000_000_000, &Pubkey::new_unique(), 1_000_000_000);
+        genesis.genesis_config.rent = solana_rent::Rent::default();
+        genesis.genesis_config.fee_rate_governor = FeeRateGovernor::new(5_000, 0);
+        let (initial, forks) =
+            Bank::new_for_tests(&genesis.genesis_config).wrap_with_bank_forks_for_tests();
+        initial.freeze();
+        initial.squash();
+        initial.force_flush_accounts_cache();
+        let storage = Arc::clone(&initial.rc.accounts.accounts_db);
+        let recipient = Pubkey::new_unique();
+        for slot in 1..=4 {
+            let parent = forks.read().unwrap().root_bank();
+            let child = Bank::new_from_parent(Arc::clone(&parent), *parent.leader(), slot);
+            assert!(Arc::ptr_eq(
+                &storage,
+                &child.rc.accounts.accounts_db.pq_storage_db()
+            ));
+            let tx = solana_system_transaction::transfer(
+                &genesis.mint_keypair,
+                &recipient,
+                slot * 1_000_000,
+                child.last_blockhash(),
+            );
+            assert!(tx.verify().is_ok());
+            assert!(child.process_transaction(&tx).is_ok());
+            child.freeze();
+            let hash = child.hash();
+            forks.write().unwrap().insert(child);
+            forks.write().unwrap().set_root(slot, None, Some(slot));
+            let root = forks.read().unwrap().root_bank();
+            maintain_root_accounts(&root, slot - 1, true, true);
+            assert_eq!(storage.accounts_cache.num_slots(), 1);
+            assert_eq!(storage.accounts_cache.num_unflushed_roots(), 1);
+            assert_eq!(root.hash(), hash);
+            assert_eq!(
+                root.get_balance(&recipient),
+                (1..=slot).sum::<u64>() * 1_000_000
+            );
+            assert_eq!(root.pq_config().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn test_pq_root_snapshot_maintenance_uses_original_full_and_incremental_metadata() {
+        let (initial, forks, authority, key, config) = pq_maintenance_bank();
+        initial.freeze();
+        initial.squash();
+        let storage = initial.rc.accounts.accounts_db.pq_storage_db();
+        let (sender, receiver) = bounded(16);
+        let packages = Arc::new(Mutex::new(PendingSnapshotPackages::default()));
+        let handler = SnapshotRequestHandler {
+            snapshot_controller: Arc::new(SnapshotController::new(
+                sender,
+                SnapshotConfig::default(),
+                0,
+            )),
+            snapshot_request_receiver: receiver,
+            pending_snapshot_packages: Arc::clone(&packages),
+        };
+        let recipient = Pubkey::new_unique();
+        let mut snapshot_roots = Vec::new();
+        for slot in 1..=2 {
+            let parent = forks.read().unwrap().root_bank();
+            let child = Arc::new(
+                Bank::new_isolated_pq_child(Arc::clone(&parent), *parent.leader(), slot).unwrap(),
+            );
+            let wire = pq_maintenance_transfer(
+                &child,
+                authority.pubkey(),
+                &key,
+                &config,
+                recipient,
+                slot * 1_000_000,
+            );
+            assert_eq!(
+                child
+                    .process_transaction_with_metadata(wire)
+                    .unwrap()
+                    .status,
+                Ok(())
+            );
+            child.freeze();
+            child.detach_isolated_pq_parent().unwrap();
+            let state = child.pq_state_commitment();
+            // Supply native package metadata in this fixture only; PQ recovery
+            // still requires its separate full-width authenticated checkpoint.
+            child.set_block_id(Some(child.hash()));
+            forks
+                .write()
+                .unwrap()
+                .promote_pq_candidate(Arc::clone(&child), parent.pq_state_commitment())
+                .unwrap();
+            let request = SnapshotRequest {
+                snapshot_root_bank: Arc::clone(&child),
+                status_cache_slot_deltas: child.status_cache.read().unwrap().root_slot_deltas(),
+                request_kind: if slot == 1 {
+                    SnapshotRequestKind::FullSnapshot
+                } else {
+                    SnapshotRequestKind::IncrementalSnapshot
+                },
+                enqueued: Instant::now(),
+            };
+            let expected_kind = if slot == 1 {
+                SnapshotKind::Archive(SnapshotArchiveKind::Full)
+            } else {
+                SnapshotKind::Archive(SnapshotArchiveKind::Incremental(1))
+            };
+            assert_eq!(new_snapshot_kind(&request), Some(expected_kind));
+            assert_eq!(
+                handler
+                    .handle_snapshot_request(0, request, expected_kind)
+                    .unwrap(),
+                slot
+            );
+            assert_eq!(storage.accounts_cache.num_slots(), 0);
+            assert_eq!(storage.accounts_cache.num_unflushed_roots(), 0);
+            assert!(storage.accounts_cache.fetch_max_flush_root().unwrap() >= slot);
+            assert_eq!(storage.latest_full_snapshot_slot(), Some(1));
+            assert_eq!(
+                child.rc.accounts.accounts_db.latest_full_snapshot_slot(),
+                None
+            );
+            assert_eq!(child.pq_state_commitment(), state);
+            assert_eq!(
+                child.pq_accounts_commitment(),
+                recompute_pq_accounts(&child)
+            );
+            snapshot_roots.push((child, state));
+        }
+        assert!(!packages.lock().unwrap().is_empty());
+        for (bank, state) in snapshot_roots {
+            assert_eq!(bank.pq_state_commitment(), state);
+            assert_eq!(bank.pq_accounts_commitment(), recompute_pq_accounts(&bank));
+        }
+        // This checks physical maintenance/package construction only. Native
+        // snapshots still do not carry the full-width PQ recovery checkpoint.
+    }
 
     #[test]
     fn test_accounts_background_service_remove_dead_slots() {

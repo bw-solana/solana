@@ -7,7 +7,7 @@ use trees::{Tree, TreeWalk};
 use {
     crate::{
         ancestor_iterator::AncestorIterator,
-        blockstore::column::{TypedColumn, columns as cf},
+        blockstore::column::{Column, TypedColumn, columns as cf},
         blockstore_db::{
             DBPinnableSlice, DBPinnedT, IteratorDirection, IteratorMode, LedgerColumn, Rocks,
             WriteBatch,
@@ -26,6 +26,7 @@ use {
         slot_stats::{ShredSource, SlotsStats},
         transaction_address_lookup_table_scanner::scan_transaction,
     },
+    agave_pq_crypto::crypto::Sha384Stream,
     agave_snapshots::unpack_genesis_archive,
     agave_votor_messages::{
         migration::MigrationStatus, unverified_vote_message::UnverifiedCertificate,
@@ -92,6 +93,7 @@ use {
             Arc, Mutex, MutexGuard, OnceLock, RwLock,
             atomic::{AtomicBool, AtomicU64, Ordering},
         },
+        time::Instant,
     },
     tar,
     tempfile::{Builder, TempDir},
@@ -370,6 +372,25 @@ pub struct VersionedConfirmedBlockWithComponents {
     pub components: Vec<ConfirmedBlockComponent>,
 }
 
+/// Native Agave transaction/status/address-index data produced by SVM for a
+/// certified experimental PQ block. No peer supplies these execution results.
+pub type ExperimentalPqTransaction = (
+    VersionedTransaction,
+    TransactionStatusMeta,
+    Vec<(Pubkey, bool)>,
+);
+
+// The RPC archive is a local container for the authenticated block's native
+// transactions. Status metadata and address indexes use their normal columns;
+// they are not included in this wire-payload bound. The Core block codec also
+// bounds its complete payload, including framing, to eight MiB.
+const PQ_RPC_MAX_TRANSACTIONS: usize = 8192;
+const PQ_RPC_MAX_TRANSACTION_BYTES: usize = 16 * 1024;
+const PQ_RPC_MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+const PQ_RPC_HEADER_BYTES: usize = 148;
+const PQ_RPC_MAX_ARCHIVE_BYTES: usize =
+    PQ_RPC_HEADER_BYTES + PQ_RPC_MAX_PAYLOAD_BYTES + PQ_RPC_MAX_TRANSACTIONS * 4;
+
 /// A "complete data set" is a range of [`Shred`]s that combined in sequence carry a single
 /// serialized [`Vec<Entry>`].
 ///
@@ -412,6 +433,8 @@ impl SwitchBlockLock {
 pub struct Blockstore {
     ledger_path: PathBuf,
     db: Arc<Rocks>,
+    experimental_pq_cf: LedgerColumn<cf::ExperimentalPq>,
+    experimental_pq_journal: Mutex<Option<PqJournalAccumulator>>,
 
     // Shred insertion column families
     data_shred_cf: LedgerColumn<cf::ShredData>,
@@ -691,7 +714,1055 @@ pub fn banking_trace_path(path: &Path) -> PathBuf {
     path.join("banking_trace")
 }
 
+struct PqJournalAccumulator {
+    metadata: Vec<u8>,
+    hasher: Sha384Stream,
+}
+
+/// Maximum retained authenticated PQ recovery-record body. This is a finite
+/// prototype budget; it does not reclaim history or replace a trusted checkpoint.
+pub const MAX_EXPERIMENTAL_PQ_JOURNAL_BYTES: u64 = 256 * 1024 * 1024 * 1024;
+
+const MAX_PQ_PROPOSAL_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+
+/// Durable pre-publication intent for an immutable local streaming proposal.
+/// This is a restart fence, not authentication or a certified block witness.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExperimentalPqProposalIntent {
+    pub chain: [u8; 32],
+    pub epoch: u64,
+    pub slot: Slot,
+    pub parent: [u8; 48],
+    pub candidate: [u8; 48],
+    pub payload: Vec<u8>,
+}
+
+impl ExperimentalPqProposalIntent {
+    fn key(slot: Slot) -> [u8; 48] {
+        let mut key = [0; 48];
+        key[..8].copy_from_slice(b"PQINTN01");
+        key[8..16].copy_from_slice(&slot.to_be_bytes());
+        key[47] = 2;
+        key
+    }
+
+    fn encode(&self) -> Result<Vec<u8>> {
+        if self.slot == 0
+            || self.payload.is_empty()
+            || self.payload.len() > MAX_PQ_PROPOSAL_PAYLOAD_BYTES
+            || self.candidate
+                != agave_pq_crypto::crypto::hash_commitment(
+                    b"agave-pq-candidate-v1",
+                    &[
+                        &self.chain,
+                        &self.slot.to_le_bytes(),
+                        &self.parent,
+                        &self.payload,
+                    ],
+                )
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ proposal intent bounds or candidate".into(),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(208 + self.payload.len());
+        bytes.extend_from_slice(b"PQPINT01");
+        bytes.extend_from_slice(&self.chain);
+        bytes.extend_from_slice(&self.epoch.to_le_bytes());
+        bytes.extend_from_slice(&self.slot.to_le_bytes());
+        bytes.extend_from_slice(&self.parent);
+        bytes.extend_from_slice(&self.candidate);
+        bytes.extend_from_slice(&(self.payload.len() as u64).to_le_bytes());
+        // The candidate already binds every payload byte. This extra digest
+        // binds the complete header, including epoch and canonical extent.
+        let header_digest = agave_pq_crypto::crypto::hash_commitment(
+            b"agave-pq-proposal-intent-header-v1",
+            &[&bytes],
+        );
+        bytes.extend_from_slice(&self.payload);
+        bytes.extend_from_slice(&header_digest);
+        Ok(bytes)
+    }
+
+    fn decode(expected_slot: Slot, bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < 209
+            || bytes.len() > MAX_PQ_PROPOSAL_PAYLOAD_BYTES + 208
+            || &bytes[..8] != b"PQPINT01"
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ proposal intent encoding".into(),
+            ));
+        }
+        let length = u64::from_le_bytes(bytes[152..160].try_into().unwrap());
+        if length == 0
+            || length > MAX_PQ_PROPOSAL_PAYLOAD_BYTES as u64
+            || bytes.len() != 208 + length as usize
+            || bytes[bytes.len() - 48..]
+                != agave_pq_crypto::crypto::hash_commitment(
+                    b"agave-pq-proposal-intent-header-v1",
+                    &[&bytes[..160]],
+                )
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ proposal intent extent or checksum".into(),
+            ));
+        }
+        let intent = Self {
+            chain: bytes[8..40].try_into().unwrap(),
+            epoch: u64::from_le_bytes(bytes[40..48].try_into().unwrap()),
+            slot: u64::from_le_bytes(bytes[48..56].try_into().unwrap()),
+            parent: bytes[56..104].try_into().unwrap(),
+            candidate: bytes[104..152].try_into().unwrap(),
+            payload: bytes[160..160 + length as usize].to_vec(),
+        };
+        if intent.slot != expected_slot
+            || intent.candidate
+                != agave_pq_crypto::crypto::hash_commitment(
+                    b"agave-pq-candidate-v1",
+                    &[
+                        &intent.chain,
+                        &intent.slot.to_le_bytes(),
+                        &intent.parent,
+                        &intent.payload,
+                    ],
+                )
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ proposal intent identity".into(),
+            ));
+        }
+        Ok(intent)
+    }
+}
+
+/// Stored journal counters, decoded from its fixed-size metadata only.
+/// These are diagnostics, not proof that the historical body is authentic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExperimentalPqJournalUsage {
+    pub body_bytes: u64,
+    pub records: u32,
+    pub chunks: u64,
+}
+
+fn pq_journal_metadata_usage(metadata: &[u8]) -> Result<ExperimentalPqJournalUsage> {
+    if metadata.len() != 125 || (&metadata[..8] != b"PQJNL002" && &metadata[..8] != b"PQJNL003") {
+        return Err(BlockstoreError::InvalidShredData(
+            "PQ journal metadata".into(),
+        ));
+    }
+    let usage = ExperimentalPqJournalUsage {
+        chunks: u64::from_le_bytes(metadata[8..16].try_into().unwrap()),
+        body_bytes: u64::from_le_bytes(metadata[16..24].try_into().unwrap()),
+        records: u32::from_le_bytes(metadata[73..77].try_into().unwrap()),
+    };
+    if usage.chunks > 4_194_304
+        || usage.records > 4_194_304
+        || usage.body_bytes > MAX_EXPERIMENTAL_PQ_JOURNAL_BYTES
+        || metadata[24] != 1
+        || usage.body_bytes < u64::from(usage.records) * 9
+    {
+        return Err(BlockstoreError::InvalidShredData(
+            "PQ journal streaming bounds".into(),
+        ));
+    }
+    Ok(usage)
+}
+
+fn pq_ledger_commitment_hex(commitment: &[u8; 48]) -> String {
+    let mut value = String::with_capacity(96);
+    for byte in commitment {
+        let _ = write!(value, "{byte:02x}");
+    }
+    value
+}
+
+fn pq_journal_hasher() -> Sha384Stream {
+    let mut hasher = Sha384Stream::new();
+    // Recovery records are self-delimiting. A fixed domain permits incremental
+    // continuation without a changing length prefix before historic data.
+    hasher.update(b"agave/pq/durable-recovery-journal-body/v2");
+    hasher
+}
+
+fn pq_journal_checksum(metadata: &[u8], body: &[u8]) -> [u8; 48] {
+    if &metadata[..8] == b"PQJNL003" {
+        let mut hasher = pq_journal_hasher();
+        hasher.update(body);
+        hasher.finalize()
+    } else {
+        agave_pq_crypto::crypto::hash_commitment(b"agave-pq-journal-prefix-v1", &[body])
+    }
+}
+
 impl Blockstore {
+    /// Store native RPC transaction history for a root already certified by the
+    /// durable Quantumglow journal. This uses the normal transaction-status and
+    /// address-signature columns, with a distinct PQ transaction archive rather
+    /// than fabricating classical signed shreds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_experimental_pq_rpc_block(
+        &self,
+        slot: Slot,
+        commitment: [u8; 48],
+        parent_slot: Slot,
+        previous_blockhash: Hash,
+        blockhash: Hash,
+        block_height: u64,
+        block_time: UnixTimestamp,
+        transactions: &[ExperimentalPqTransaction],
+    ) -> Result<()> {
+        if !self.is_root(slot)
+            || parent_slot >= slot
+            || transactions.len() > PQ_RPC_MAX_TRANSACTIONS
+            || self
+                .experimental_pq_cf
+                .get_bytes((slot, commitment))?
+                .is_none()
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ RPC block lacks certified root".into(),
+            ));
+        }
+        let mut archive = b"AGVPQRPC".to_vec();
+        archive.extend_from_slice(&commitment);
+        archive.extend_from_slice(&parent_slot.to_le_bytes());
+        archive.extend_from_slice(previous_blockhash.as_ref());
+        archive.extend_from_slice(blockhash.as_ref());
+        archive.extend_from_slice(&block_height.to_le_bytes());
+        archive.extend_from_slice(&block_time.to_le_bytes());
+        archive.extend_from_slice(&(transactions.len() as u32).to_le_bytes());
+        let mut batch = self.db.batch();
+        let mut payload_bytes = 0usize;
+        for (index, (transaction, status, keys)) in transactions.iter().enumerate() {
+            let wire = wincode::serialize(transaction)?;
+            payload_bytes = payload_bytes.saturating_add(wire.len());
+            if wire.len() > PQ_RPC_MAX_TRANSACTION_BYTES
+                || payload_bytes > PQ_RPC_MAX_PAYLOAD_BYTES
+                || transaction.signatures.is_empty()
+            {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ RPC transaction bounds".into(),
+                ));
+            }
+            archive.extend_from_slice(&(wire.len() as u32).to_le_bytes());
+            archive.extend_from_slice(&wire);
+            let signature = transaction.signatures[0];
+            let protobuf: solana_storage_proto::convert::generated::TransactionStatusMeta =
+                status.clone().into();
+            self.transaction_status_cf.put_bytes_in_batch(
+                &mut batch,
+                (signature, slot),
+                &prost::Message::encode_to_vec(&protobuf),
+            );
+            for &(address, writable) in keys {
+                self.address_signatures_cf.put_in_batch(
+                    &mut batch,
+                    (address, slot, index as u32, signature),
+                    &AddressSignatureMeta {
+                        writeable: writable,
+                    },
+                )?;
+            }
+        }
+        if archive.len() > PQ_RPC_MAX_ARCHIVE_BYTES {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ RPC archive bounds".into(),
+            ));
+        }
+        self.experimental_pq_cf
+            .put_bytes_in_batch(&mut batch, (slot, [0xff; 48]), &archive);
+        self.block_height_cf
+            .put_in_batch(&mut batch, slot, &block_height)?;
+        self.blocktime_cf
+            .put_in_batch(&mut batch, slot, &block_time)?;
+        // Zero classical shred counts accurately describe this separate format.
+        self.meta_cf
+            .put_in_batch(&mut batch, slot, &SlotMeta::new(slot, Some(parent_slot)))?;
+        self.db.write_sync(batch)
+    }
+
+    fn read_experimental_pq_rpc_block(
+        &self,
+        slot: Slot,
+    ) -> Result<Option<VersionedConfirmedBlock>> {
+        let Some(archive) = self.experimental_pq_cf.get_bytes((slot, [0xff; 48]))? else {
+            return Ok(None);
+        };
+        if archive.len() < PQ_RPC_HEADER_BYTES
+            || archive.len() > PQ_RPC_MAX_ARCHIVE_BYTES
+            || &archive[..8] != b"AGVPQRPC"
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ RPC archive header".into(),
+            ));
+        }
+        let commitment: [u8; 48] = archive[8..56].try_into().unwrap();
+        if !self.is_root(slot)
+            || self
+                .experimental_pq_cf
+                .get_bytes((slot, commitment))?
+                .is_none()
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ RPC archive root binding".into(),
+            ));
+        }
+        let parent_slot = Slot::from_le_bytes(archive[56..64].try_into().unwrap());
+        let previous_blockhash =
+            Hash::new_from_array(archive[64..96].try_into().unwrap()).to_string();
+        let blockhash = Hash::new_from_array(archive[96..128].try_into().unwrap()).to_string();
+        let block_height = u64::from_le_bytes(archive[128..136].try_into().unwrap());
+        let block_time = UnixTimestamp::from_le_bytes(archive[136..144].try_into().unwrap());
+        let count = u32::from_le_bytes(archive[144..148].try_into().unwrap()) as usize;
+        if count > PQ_RPC_MAX_TRANSACTIONS || count > (archive.len() - PQ_RPC_HEADER_BYTES) / 4 {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ RPC archive count".into(),
+            ));
+        }
+        let mut at = PQ_RPC_HEADER_BYTES;
+        let mut payload_bytes = 0usize;
+        let mut transactions = Vec::with_capacity(count);
+        for _ in 0..count {
+            let Some(length) = archive.get(at..at + 4) else {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ RPC archive truncated".into(),
+                ));
+            };
+            at += 4;
+            let length = u32::from_le_bytes(length.try_into().unwrap()) as usize;
+            payload_bytes = payload_bytes.saturating_add(length);
+            if length > PQ_RPC_MAX_TRANSACTION_BYTES || payload_bytes > PQ_RPC_MAX_PAYLOAD_BYTES {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ RPC wire bounds".into(),
+                ));
+            }
+            let Some(wire) = archive.get(at..at + length) else {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ RPC wire truncated".into(),
+                ));
+            };
+            let transaction: VersionedTransaction = wincode::deserialize(wire)?;
+            if transaction.signatures.is_empty() || wincode::serialize(&transaction)? != wire {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ RPC wire noncanonical".into(),
+                ));
+            }
+            transactions.push(transaction);
+            at += length;
+        }
+        if at != archive.len() {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ RPC archive trailing bytes".into(),
+            ));
+        }
+        // Validate the complete wire container before performing status reads.
+        // A truncated or over-payload archive cannot turn a later missing
+        // status into the apparent cause of its structural corruption.
+        let transactions = transactions
+            .into_iter()
+            .map(|transaction| {
+                let meta = self
+                    .read_transaction_status((transaction.signatures[0], slot))?
+                    .ok_or(BlockstoreError::MissingTransactionMetadata)?;
+                Ok(VersionedTransactionWithStatusMeta { transaction, meta })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(VersionedConfirmedBlock {
+            previous_blockhash,
+            blockhash,
+            parent_slot,
+            transactions,
+            rewards: vec![],
+            num_partitions: None,
+            block_time: Some(block_time),
+            block_height: Some(block_height),
+        }))
+    }
+    /// Persist an immutable, authenticated PQ block witness in the real ledger.
+    /// Authentication is performed by Quantumglow before this method is called;
+    /// replay authenticates the stored raw witness again rather than trusting DB
+    /// bytes. This column deliberately does not use the 64-byte Ed25519 shred
+    /// format and cannot authorize the classical replay path.
+    pub fn put_experimental_pq_block(
+        &self,
+        slot: Slot,
+        commitment: [u8; 48],
+        witness: &[u8],
+    ) -> Result<()> {
+        if slot == 0 || witness.is_empty() || witness.len() > 64 * 1024 * 1024 {
+            return Err(BlockstoreError::InvalidShredData("PQ block bounds".into()));
+        }
+        let started = Instant::now();
+        let guard = self.insert_shreds_lock.lock().unwrap();
+        let lock_wait_us = started.elapsed().as_micros();
+        let acquired = Instant::now();
+        if let Some(existing) = self.experimental_pq_cf.get_bytes((slot, commitment))? {
+            return if existing == witness {
+                Ok(())
+            } else {
+                Err(BlockstoreError::InvalidShredData(
+                    "PQ block overwrite".into(),
+                ))
+            };
+        }
+        let mut batch = self.db.batch();
+        self.experimental_pq_cf
+            .put_bytes_in_batch(&mut batch, (slot, commitment), witness);
+        let prepare_us = acquired.elapsed().as_micros();
+        let write_started = Instant::now();
+        self.db.write_sync(batch)?;
+        let write_sync_us = write_started.elapsed().as_micros();
+        drop(guard);
+        let total_us = started.elapsed().as_micros();
+        info!(
+            "PQ ledger stage=write class=body slot={} block_commitment={} bytes={} values=1 \
+             lock_wait_us={} prepare_us={} write_sync_us={} total_us={}",
+            slot,
+            pq_ledger_commitment_hex(&commitment),
+            witness.len(),
+            lock_wait_us,
+            prepare_us,
+            write_sync_us,
+            total_us
+        );
+        Ok(())
+    }
+
+    /// Publish the immutable local-slot witness and its commitment lookup with
+    /// one atomic, synced batch. The producer must already have fixed its exact
+    /// proposal intent before releasing any signed data. Both historical keys
+    /// remain available to recovery; neither this write nor either key roots a
+    /// block or authenticates it for consensus.
+    pub fn put_experimental_pq_local_block(
+        &self,
+        slot: Slot,
+        commitment: [u8; 48],
+        witness: &[u8],
+    ) -> Result<()> {
+        if slot == 0
+            || commitment == [0; 48]
+            || witness.is_empty()
+            || witness.len() > 64 * 1024 * 1024
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ local block bounds".into(),
+            ));
+        }
+        let started = Instant::now();
+        let guard = self.insert_shreds_lock.lock().unwrap();
+        let lock_wait_us = started.elapsed().as_micros();
+        let acquired = Instant::now();
+        let mut missing = Vec::with_capacity(2);
+        for key in [(slot, [0; 48]), (slot, commitment)] {
+            match self.experimental_pq_cf.get_bytes(key)? {
+                Some(existing) if existing != witness => {
+                    return Err(BlockstoreError::InvalidShredData(
+                        "PQ local block overwrite".into(),
+                    ));
+                }
+                Some(_) => {}
+                None => missing.push(key),
+            }
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let values = missing.len();
+        let mut batch = self.db.batch();
+        for key in missing {
+            self.experimental_pq_cf
+                .put_bytes_in_batch(&mut batch, key, witness);
+        }
+        let prepare_us = acquired.elapsed().as_micros();
+        let write_started = Instant::now();
+        self.db.write_sync(batch)?;
+        let write_sync_us = write_started.elapsed().as_micros();
+        drop(guard);
+        let total_us = started.elapsed().as_micros();
+        info!(
+            "PQ ledger stage=write class=local_body slot={} block_commitment={} \
+             bytes_per_value={} values={} lock_wait_us={} prepare_us={} write_sync_us={} \
+             total_us={}",
+            slot,
+            pq_ledger_commitment_hex(&commitment),
+            witness.len(),
+            values,
+            lock_wait_us,
+            prepare_us,
+            write_sync_us,
+            total_us
+        );
+        Ok(())
+    }
+
+    pub fn get_experimental_pq_block(
+        &self,
+        slot: Slot,
+        commitment: [u8; 48],
+    ) -> Result<Option<Vec<u8>>> {
+        self.experimental_pq_cf.get_bytes((slot, commitment))
+    }
+
+    /// Fix the complete candidate before any of its signed batches leave the
+    /// process. A partial stream is never permission to reuse its slot after
+    /// restart. Exact repetition is idempotent; conflicting data fails closed.
+    pub fn put_experimental_pq_proposal_intent(
+        &self,
+        intent: &ExperimentalPqProposalIntent,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let bytes = intent.encode()?;
+        let key = (0, ExperimentalPqProposalIntent::key(intent.slot));
+        let lock_started = Instant::now();
+        let guard = self.insert_shreds_lock.lock().unwrap();
+        let lock_wait_us = lock_started.elapsed().as_micros();
+        let acquired = Instant::now();
+        if let Some(existing) = self.experimental_pq_cf.get_bytes(key)? {
+            ExperimentalPqProposalIntent::decode(intent.slot, &existing)?;
+            return if existing == bytes {
+                Ok(())
+            } else {
+                Err(BlockstoreError::InvalidShredData(
+                    "PQ proposal intent overwrite".into(),
+                ))
+            };
+        }
+        // Historical complete proposals did not have the streaming fence.
+        // They must not permit a new partial proposal before the old witness
+        // overwrite check would eventually reject its terminal marker.
+        if self
+            .experimental_pq_cf
+            .get_bytes((intent.slot, [0; 48]))?
+            .is_some()
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ legacy proposal slot already fixed".into(),
+            ));
+        }
+        let mut batch = self.db.batch();
+        self.experimental_pq_cf
+            .put_bytes_in_batch(&mut batch, key, &bytes);
+        let prepare_us = acquired.elapsed().as_micros();
+        let write_started = Instant::now();
+        self.db.write_sync(batch)?;
+        let write_sync_us = write_started.elapsed().as_micros();
+        drop(guard);
+        let total_us = started.elapsed().as_micros();
+        info!(
+            "PQ ledger stage=write class=intent slot={} payload_candidate={} bytes={} values=1 \
+             lock_wait_us={} prepare_us={} write_sync_us={} total_us={}",
+            intent.slot,
+            pq_ledger_commitment_hex(&intent.candidate),
+            bytes.len(),
+            lock_wait_us,
+            prepare_us,
+            write_sync_us,
+            total_us
+        );
+        Ok(())
+    }
+
+    pub fn get_experimental_pq_proposal_intent(
+        &self,
+        slot: Slot,
+    ) -> Result<Option<ExperimentalPqProposalIntent>> {
+        if slot == 0 {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ proposal intent slot".into(),
+            ));
+        }
+        self.experimental_pq_cf
+            .get_bytes((0, ExperimentalPqProposalIntent::key(slot)))?
+            .map(|bytes| ExperimentalPqProposalIntent::decode(slot, &bytes))
+            .transpose()
+    }
+
+    /// Visit untrusted PQ witness lookup keys within an inclusive slot range.
+    ///
+    /// This reads raw iterator keys without copying or decoding witness bodies.
+    /// It also discovers witnesses durably written before a journal append, but
+    /// does not establish authentication, ancestry, epoch membership or rooting.
+    /// Callers must fully authenticate the exact requested witness before using
+    /// it, and must keep these hints separate from authenticated block metadata.
+    /// Slot-zero journal records and reserved proposal/RPC keys are excluded.
+    /// No history vector is allocated here; `maximum_records` bounds the number
+    /// of delivered keys and is checked before invoking the visitor.
+    pub fn visit_experimental_pq_block_index(
+        &self,
+        first_slot: Slot,
+        last_slot: Slot,
+        maximum_records: usize,
+        mut visitor: impl FnMut(Slot, [u8; 48]) -> Result<()>,
+    ) -> Result<usize> {
+        if first_slot > last_slot {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ witness index slot range".into(),
+            ));
+        }
+        if last_slot == 0 {
+            return Ok(0);
+        }
+        let mut iterator = self.db.raw_iterator_cf(self.experimental_pq_cf.handle())?;
+        iterator.seek(cf::ExperimentalPq::key(&(first_slot.max(1), [0; 48])));
+        let mut count = 0;
+        while let Some(key) = iterator.key() {
+            if key.len() != 56 {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ witness index key length".into(),
+                ));
+            }
+            let (slot, commitment) = cf::ExperimentalPq::index(key);
+            if slot > last_slot {
+                break;
+            }
+            if commitment != [0; 48] && commitment != [0xff; 48] {
+                if count == maximum_records {
+                    return Err(BlockstoreError::InvalidShredData(
+                        "PQ witness index record limit".into(),
+                    ));
+                }
+                visitor(slot, commitment)?;
+                count += 1;
+            }
+            iterator.next();
+        }
+        iterator.status()?;
+        Ok(count)
+    }
+
+    /// Atomically and durably store the complete Quantumglow recovery journal
+    /// with newly finalized roots. Callers publish votes or update BankForks only
+    /// after this returns. No unsigned RPC request can mark a PQ slot rooted.
+    pub fn put_experimental_pq_checkpoint(
+        &self,
+        journal: &[u8],
+        finalized: &[(Slot, [u8; 48])],
+    ) -> Result<()> {
+        if journal.is_empty() || journal.len() > 512 * 1024 * 1024 {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ journal bounds".into(),
+            ));
+        }
+        const HEADER: usize = 53;
+        if journal.len() < HEADER || journal[0] != 1 {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ journal header".into(),
+            ));
+        }
+        // Journal metadata and its checksum continuation form one mutable
+        // namespace. Hold that namespace's lock before reading its cursor,
+        // through the synced write and cache update. Body/intent insertion
+        // uses independent immutable keys and must not wait on this append.
+        let mut accumulator = self.experimental_pq_journal.lock().unwrap();
+        let mut batch = self.db.batch();
+        for &(slot, commitment) in finalized {
+            if slot == 0
+                || self
+                    .experimental_pq_cf
+                    .get_bytes((slot, commitment))?
+                    .is_none()
+            {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ root has no durable block witness".into(),
+                ));
+            }
+            self.roots_cf.put_in_batch(&mut batch, slot, &true)?;
+        }
+        let previous = self.experimental_pq_cf.get_bytes((0, [0; 48]))?;
+        let streaming_checksum = previous
+            .as_ref()
+            .is_some_and(|bytes| bytes.starts_with(b"PQJNL003"));
+        let (sequence, previous_body) = match previous {
+            None => (0, 0),
+            Some(bytes)
+                if bytes.len() == 125
+                    && (&bytes[..8] == b"PQJNL002" || &bytes[..8] == b"PQJNL003") =>
+            {
+                if bytes[24..73] != journal[..49]
+                    || u32::from_le_bytes(bytes[73..77].try_into().unwrap())
+                        > u32::from_le_bytes(journal[49..53].try_into().unwrap())
+                {
+                    return Err(BlockstoreError::InvalidShredData(
+                        "PQ journal rollback".into(),
+                    ));
+                }
+                let previous_body =
+                    usize::try_from(u64::from_le_bytes(bytes[16..24].try_into().unwrap()))
+                        .map_err(|_| BlockstoreError::InvalidShredData("PQ journal size".into()))?;
+                if previous_body > journal.len() - HEADER
+                    || pq_journal_checksum(&bytes, &journal[HEADER..HEADER + previous_body])
+                        != bytes[77..125]
+                {
+                    return Err(BlockstoreError::InvalidShredData(
+                        "PQ journal prefix changed".into(),
+                    ));
+                }
+                (
+                    u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                    previous_body,
+                )
+            }
+            Some(_) => {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ journal metadata".into(),
+                ));
+            }
+        };
+        let body = &journal[HEADER..];
+        if previous_body > body.len() || sequence >= 65_536 {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ journal bounds".into(),
+            ));
+        }
+        let next = if body.len() > previous_body {
+            let next = sequence + 1;
+            let mut key = [0; 48];
+            key[..8].copy_from_slice(&next.to_be_bytes());
+            key[47] = 1;
+            self.experimental_pq_cf.put_bytes_in_batch(
+                &mut batch,
+                (0, key),
+                &body[previous_body..],
+            );
+            next
+        } else {
+            sequence
+        };
+        let mut metadata = Vec::with_capacity(125);
+        metadata.extend_from_slice(if streaming_checksum {
+            b"PQJNL003"
+        } else {
+            b"PQJNL002"
+        });
+        metadata.extend_from_slice(&next.to_le_bytes());
+        metadata.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        metadata.extend_from_slice(&journal[..HEADER]);
+        let checksum = pq_journal_checksum(&metadata, body);
+        metadata.extend_from_slice(&checksum);
+        self.experimental_pq_cf
+            .put_bytes_in_batch(&mut batch, (0, [0; 48]), &metadata);
+        self.db.write_sync(batch)?;
+        *accumulator = None;
+        if let Some(maximum) = finalized.iter().map(|(slot, _)| *slot).max() {
+            self.max_root.fetch_max(maximum, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    /// Append canonical Quantumglow records with work proportional to the new
+    /// records. The exact prior cursor, immutable journal binding and synced
+    /// metadata prevent accidental rollback or replacement of earlier inputs.
+    /// A reopen validates the complete historical checksum once before caching
+    /// its SHA384 continuation. Both legacy checksum metadata and the original
+    /// canonical recovery-record wire format remain readable.
+    pub fn append_experimental_pq_checkpoint(
+        &self,
+        header: &[u8; 53],
+        previous_records: u32,
+        new_body: &[u8],
+        finalized: &[(Slot, [u8; 48])],
+    ) -> Result<()> {
+        let started = Instant::now();
+        let records = u32::from_le_bytes(header[49..53].try_into().unwrap());
+        if header[0] != 1
+            || records < previous_records
+            || records > 4_194_304
+            || new_body.len() > 64 * 1024 * 1024
+            || (records == previous_records && !new_body.is_empty())
+            || new_body.len() < (records - previous_records) as usize * 9
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ incremental journal bounds".into(),
+            ));
+        }
+        let lock_started = Instant::now();
+        let mut accumulator = self.experimental_pq_journal.lock().unwrap();
+        let lock_wait_us = lock_started.elapsed().as_micros();
+        let acquired = Instant::now();
+        let previous = self.experimental_pq_cf.get_bytes((0, [0; 48]))?;
+        let (sequence, previous_body) = match &previous {
+            None if previous_records == 0 => (0, 0),
+            Some(metadata)
+                if metadata.len() == 125
+                    && (&metadata[..8] == b"PQJNL002" || &metadata[..8] == b"PQJNL003") =>
+            {
+                if metadata[24..73] != header[..49]
+                    || u32::from_le_bytes(metadata[73..77].try_into().unwrap()) != previous_records
+                {
+                    return Err(BlockstoreError::InvalidShredData(
+                        "PQ incremental journal stale cursor or binding".into(),
+                    ));
+                }
+                (
+                    u64::from_le_bytes(metadata[8..16].try_into().unwrap()),
+                    u64::from_le_bytes(metadata[16..24].try_into().unwrap()),
+                )
+            }
+            _ => {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ incremental journal metadata".into(),
+                ));
+            }
+        };
+        let body_length = previous_body.saturating_add(new_body.len() as u64);
+        if body_length > MAX_EXPERIMENTAL_PQ_JOURNAL_BYTES || sequence >= 4_194_304 {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ incremental journal cumulative bounds".into(),
+            ));
+        }
+        let mut hasher = if let Some(cached) = accumulator.as_ref().filter(|cached| {
+            previous
+                .as_ref()
+                .is_some_and(|previous| previous == &cached.metadata)
+        }) {
+            cached.hasher.clone()
+        } else {
+            let mut hasher = pq_journal_hasher();
+            if previous.is_some() {
+                self.visit_experimental_pq_journal(|_, body| {
+                    hasher.update(body);
+                    Ok(())
+                })?
+                .ok_or_else(|| {
+                    BlockstoreError::InvalidShredData("PQ incremental journal missing".into())
+                })?;
+            }
+            hasher
+        };
+        hasher.update(new_body);
+        let next = sequence + u64::from(!new_body.is_empty());
+        let mut metadata = Vec::with_capacity(125);
+        metadata.extend_from_slice(b"PQJNL003");
+        metadata.extend_from_slice(&next.to_le_bytes());
+        metadata.extend_from_slice(&body_length.to_le_bytes());
+        metadata.extend_from_slice(header);
+        metadata.extend_from_slice(&hasher.clone().finalize());
+        let mut batch = self.db.batch();
+        if !new_body.is_empty() {
+            let mut key = [0; 48];
+            key[..8].copy_from_slice(&next.to_be_bytes());
+            key[47] = 1;
+            self.experimental_pq_cf
+                .put_bytes_in_batch(&mut batch, (0, key), new_body);
+        }
+        for &(slot, commitment) in finalized {
+            if slot == 0
+                || self
+                    .experimental_pq_cf
+                    .get_bytes((slot, commitment))?
+                    .is_none()
+            {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ incremental root has no durable block witness".into(),
+                ));
+            }
+            self.roots_cf.put_in_batch(&mut batch, slot, &true)?;
+        }
+        self.experimental_pq_cf
+            .put_bytes_in_batch(&mut batch, (0, [0; 48]), &metadata);
+        let prepare_us = acquired.elapsed().as_micros();
+        let write_started = Instant::now();
+        self.db.write_sync(batch)?;
+        let write_sync_us = write_started.elapsed().as_micros();
+        *accumulator = Some(PqJournalAccumulator { metadata, hasher });
+        if let Some(maximum) = finalized.iter().map(|(slot, _)| *slot).max() {
+            self.max_root.fetch_max(maximum, Ordering::Release);
+        }
+        drop(accumulator);
+        let total_us = started.elapsed().as_micros();
+        info!(
+            "PQ ledger stage=write class=journal journal_sequence={} previous_records={} \
+             records={} body_bytes={} finalized_blocks={} lock_wait_us={} prepare_us={} \
+             write_sync_us={} total_us={}",
+            next,
+            previous_records,
+            records,
+            new_body.len(),
+            finalized.len(),
+            lock_wait_us,
+            prepare_us,
+            write_sync_us,
+            total_us
+        );
+        Ok(())
+    }
+
+    /// Read only the stored 125-byte journal metadata and validate its format,
+    /// version and counter bounds. No historical chunk is loaded or scanned.
+    /// Replay must still validate the complete checksum and authenticated body.
+    pub fn experimental_pq_journal_usage(&self) -> Result<Option<ExperimentalPqJournalUsage>> {
+        self.experimental_pq_cf
+            .get_bytes((0, [0; 48]))?
+            .map(|metadata| pq_journal_metadata_usage(&metadata))
+            .transpose()
+    }
+
+    /// Validate the entire raw journal before replay, then visit bounded WAL
+    /// chunks. Sequential borrowed values avoid repeated point-read amplification.
+    /// A fresh third scan after callbacks detects changes hidden by the replay
+    /// iterator's snapshot. No complete-history allocation is used.
+    pub fn visit_experimental_pq_journal(
+        &self,
+        mut visitor: impl FnMut(&[u8; 53], &[u8]) -> Result<()>,
+    ) -> Result<Option<[u8; 53]>> {
+        let Some(metadata) = self.experimental_pq_cf.get_bytes((0, [0; 48]))? else {
+            return Ok(None);
+        };
+        let usage = pq_journal_metadata_usage(&metadata)?;
+        let count = usage.chunks;
+        let length = usage.body_bytes;
+        let header: [u8; 53] = metadata[24..77].try_into().unwrap();
+        let mut hasher = if &metadata[..8] == b"PQJNL003" {
+            pq_journal_hasher()
+        } else {
+            let domain = b"agave-pq-journal-prefix-v1";
+            let mut hasher = Sha384Stream::new();
+            hasher.update(b"agave-pq-commitment-v1");
+            hasher.update(&(domain.len() as u64).to_le_bytes());
+            hasher.update(domain);
+            hasher.update(&1u64.to_le_bytes());
+            hasher.update(&length.to_le_bytes());
+            hasher
+        };
+        let mut replay_hasher = hasher.clone();
+        let mut final_hasher = hasher.clone();
+        let observed = self.visit_experimental_pq_journal_chunks(count, length, |chunk| {
+            hasher.update(chunk);
+            Ok(())
+        })?;
+        if observed != length || hasher.finalize() != metadata[77..125] {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ journal streaming checksum".into(),
+            ));
+        }
+        let replayed = self.visit_experimental_pq_journal_chunks(count, length, |chunk| {
+            replay_hasher.update(chunk);
+            visitor(&header, chunk)
+        })?;
+        // Raw iterators retain their opening snapshot. Open a fresh scan only
+        // after all callbacks so a changed future chunk cannot evade detection
+        // merely because the replay iterator kept its original value.
+        let final_observed = self.visit_experimental_pq_journal_chunks(count, length, |chunk| {
+            final_hasher.update(chunk);
+            Ok(())
+        })?;
+        if replayed != length
+            || final_observed != length
+            || replay_hasher.finalize() != metadata[77..125]
+            || final_hasher.finalize() != metadata[77..125]
+            || self.experimental_pq_cf.get_bytes((0, [0; 48]))?.as_deref() != Some(&metadata)
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ journal changed during replay".into(),
+            ));
+        }
+        Ok(Some(header))
+    }
+
+    /// Scan only declared keys in the exact slot-zero chunk namespace. Foreign
+    /// and undeclared keys remain ignored, as they were by the point-read path.
+    fn visit_experimental_pq_journal_chunks(
+        &self,
+        count: u64,
+        length: u64,
+        mut visitor: impl FnMut(&[u8]) -> Result<()>,
+    ) -> Result<u64> {
+        let mut first = [0; 48];
+        first[..8].copy_from_slice(&1u64.to_be_bytes());
+        first[47] = 1;
+        let mut iterator = self.db.raw_iterator_cf(self.experimental_pq_cf.handle())?;
+        iterator.seek(cf::ExperimentalPq::key(&(0, first)));
+        let mut expected = 1u64;
+        let mut observed = 0u64;
+        while expected <= count && iterator.valid() {
+            let key = iterator.key().unwrap();
+            if key.len() >= 8 && key[..8] != [0; 8] {
+                break;
+            }
+            if key.len() == 56
+                && key[..8] == [0; 8]
+                && key[16..55].iter().all(|byte| *byte == 0)
+                && key[55] == 1
+            {
+                let sequence = u64::from_be_bytes(key[8..16].try_into().unwrap());
+                if sequence != expected {
+                    iterator.status()?;
+                    return Err(BlockstoreError::InvalidShredData(
+                        "PQ journal chunk missing".into(),
+                    ));
+                }
+                let chunk = iterator.value().unwrap();
+                observed = observed.checked_add(chunk.len() as u64).ok_or_else(|| {
+                    BlockstoreError::InvalidShredData("PQ journal size overflow".into())
+                })?;
+                if chunk.is_empty() || chunk.len() > 64 * 1024 * 1024 || observed > length {
+                    return Err(BlockstoreError::InvalidShredData(
+                        "PQ journal chunk bounds".into(),
+                    ));
+                }
+                visitor(chunk)?;
+                expected += 1;
+            }
+            iterator.next();
+        }
+        iterator.status()?;
+        if expected <= count {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ journal chunk missing".into(),
+            ));
+        }
+        Ok(observed)
+    }
+
+    pub fn get_experimental_pq_checkpoint(&self) -> Result<Option<Vec<u8>>> {
+        let Some(metadata) = self.experimental_pq_cf.get_bytes((0, [0; 48]))? else {
+            return Ok(None);
+        };
+        if metadata.len() != 125 || (&metadata[..8] != b"PQJNL002" && &metadata[..8] != b"PQJNL003")
+        {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ journal metadata".into(),
+            ));
+        }
+        let count = u64::from_le_bytes(metadata[8..16].try_into().unwrap());
+        let length = usize::try_from(u64::from_le_bytes(metadata[16..24].try_into().unwrap()))
+            .map_err(|_| BlockstoreError::InvalidShredData("PQ journal size".into()))?;
+        if count > 65_536 || length > 512 * 1024 * 1024 - 53 {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ journal bounds".into(),
+            ));
+        }
+        let mut journal = Vec::with_capacity(length + 53);
+        journal.extend_from_slice(&metadata[24..77]);
+        for sequence in 1..=count {
+            let mut key = [0; 48];
+            key[..8].copy_from_slice(&sequence.to_be_bytes());
+            key[47] = 1;
+            let Some(chunk) = self.experimental_pq_cf.get_bytes((0, key))? else {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ journal chunk missing".into(),
+                ));
+            };
+            if chunk.len() > length + 53 - journal.len() {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ journal chunk size".into(),
+                ));
+            }
+            journal.extend_from_slice(&chunk);
+        }
+        if journal.len() != length + 53 {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ journal truncated".into(),
+            ));
+        }
+        if pq_journal_checksum(&metadata, &journal[53..]) != metadata[77..125] {
+            return Err(BlockstoreError::InvalidShredData(
+                "PQ journal prefix checksum".into(),
+            ));
+        }
+        Ok(Some(journal))
+    }
+
     pub fn ledger_path(&self) -> &PathBuf {
         &self.ledger_path
     }
@@ -737,6 +1808,7 @@ impl Blockstore {
         let mut measure = Measure::start("blockstore open");
         info!("Opening blockstore at {blockstore_path:?}");
         let db = Arc::new(Rocks::open(blockstore_path, options)?);
+        let experimental_pq_cf = db.column();
 
         let data_shred_cf = db.column();
         let code_shred_cf = db.column();
@@ -779,6 +1851,8 @@ impl Blockstore {
         let blockstore = Blockstore {
             ledger_path: ledger_path.to_path_buf(),
             db,
+            experimental_pq_cf,
+            experimental_pq_journal: Mutex::new(None),
             address_signatures_cf,
             bank_hash_cf,
             block_height_cf,
@@ -4181,6 +5255,13 @@ impl Blockstore {
         if first_root == 0 {
             return Ok(first_root);
         }
+        if self
+            .experimental_pq_cf
+            .get_bytes((first_root, [0xff; 48]))?
+            .is_some()
+        {
+            return Ok(first_root);
+        }
         // Otherwise, the block at root-index 0 cannot ever be complete, because it is missing its
         // parent blockhash. A parent blockhash must be calculated from the entries of the previous
         // block. Therefore, the first available complete block is that at root-index 1.
@@ -4255,6 +5336,17 @@ impl Blockstore {
         populate_components: bool,
         allow_dead_slots: bool,
     ) -> Result<VersionedConfirmedBlockWithComponents> {
+        if let Some(block) = self.read_experimental_pq_rpc_block(slot)? {
+            if populate_components {
+                return Err(BlockstoreError::InvalidShredData(
+                    "PQ block verification requires its authenticated PQ witness".into(),
+                ));
+            }
+            return Ok(VersionedConfirmedBlockWithComponents {
+                block,
+                components: vec![],
+            });
+        }
         let Some(slot_meta) = self.meta_cf.get(slot)? else {
             trace!("do_get_complete_block_with_components() failed for {slot} (missing SlotMeta)");
             return Err(BlockstoreError::SlotUnavailable);
@@ -4591,10 +5683,24 @@ impl Blockstore {
         signature: Signature,
         confirmed_unrooted_slots: &HashSet<Slot>,
     ) -> Result<(Option<(Slot, TransactionStatusMeta)>, u64)> {
-        let mut counter = 0;
-        let (lock, _) = self.ensure_lowest_cleanup_slot();
+        let (_lock, _) = self.ensure_lowest_cleanup_slot();
         let first_available_block = self.get_first_available_block()?;
+        self.get_transaction_status_from_first_available(
+            signature,
+            confirmed_unrooted_slots,
+            first_available_block,
+        )
+    }
 
+    // Callers hold the cleanup read guard while discovering the shared lower
+    // bound and seeking every full 64-byte signature in the status column.
+    fn get_transaction_status_from_first_available(
+        &self,
+        signature: Signature,
+        confirmed_unrooted_slots: &HashSet<Slot>,
+        first_available_block: Slot,
+    ) -> Result<(Option<(Slot, TransactionStatusMeta)>, u64)> {
+        let mut counter = 0;
         let iterator = self.transaction_status_cf.iter(IteratorMode::From(
             (signature, first_available_block),
             IteratorDirection::Forward,
@@ -4616,8 +5722,55 @@ impl Blockstore {
             return Ok((status, counter));
         }
 
-        drop(lock);
         Ok((None, counter))
+    }
+
+    /// Exact archived native PQ statuses with one ledger-range discovery per
+    /// batch. The cleanup guard covers discovery and all signature seeks;
+    /// durable roots beyond the caller's published account root are withheld.
+    /// The legacy Bank's truncated telemetry cache is never consulted.
+    pub fn get_experimental_pq_rooted_transaction_statuses(
+        &self,
+        signatures: &[Signature],
+        highest_published_root: Slot,
+    ) -> Result<Vec<Option<(Slot, TransactionStatusMeta)>>> {
+        self.get_experimental_pq_rooted_statuses_with_discovery(
+            signatures,
+            highest_published_root,
+            || self.get_first_available_block(),
+        )
+    }
+
+    // FnOnce makes repeated ledger-range discovery within the signature loop
+    // impossible and allows a regression to check its cleanup-lock context.
+    fn get_experimental_pq_rooted_statuses_with_discovery(
+        &self,
+        signatures: &[Signature],
+        highest_published_root: Slot,
+        discover_first_available: impl FnOnce() -> Result<Slot>,
+    ) -> Result<Vec<Option<(Slot, TransactionStatusMeta)>>> {
+        if signatures.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (cleanup_guard, lowest_available_slot) = self.ensure_lowest_cleanup_slot();
+        let first_available_block = discover_first_available()?;
+        let first_available_block = if *cleanup_guard > 0 {
+            first_available_block.max(lowest_available_slot)
+        } else {
+            first_available_block
+        };
+        let confirmed_unrooted_slots = HashSet::default();
+        signatures
+            .iter()
+            .map(|&signature| {
+                self.get_transaction_status_from_first_available(
+                    signature,
+                    &confirmed_unrooted_slots,
+                    first_available_block,
+                )
+                .map(|(status, _)| status.filter(|(slot, _)| *slot <= highest_published_root))
+            })
+            .collect()
     }
 
     /// Returns a transaction status
@@ -4697,6 +5850,14 @@ impl Blockstore {
         slot: Slot,
         signature: Signature,
     ) -> Result<Option<(VersionedTransaction, u32)>> {
+        if let Some(block) = self.read_experimental_pq_rpc_block(slot)? {
+            return Ok(block
+                .transactions
+                .into_iter()
+                .enumerate()
+                .find(|(_, tx)| tx.transaction.signatures.first() == Some(&signature))
+                .map(|(index, tx)| (tx.transaction, index as u32)));
+        }
         let slot_meta = self.meta(slot)?.ok_or(BlockstoreError::SlotUnavailable)?;
         let slot_entries =
             self.get_slot_entries(slot, u64::from(slot_meta.replay_fec_set_index))?;
@@ -5656,7 +6817,13 @@ impl Blockstore {
             .slot_meta_iterator(0)
             .expect("unable to iterate over meta")
         {
-            if meta.received > 0 {
+            if meta.received > 0
+                || self
+                    .experimental_pq_cf
+                    .get_bytes((slot, [0xff; 48]))
+                    .expect("unable to read native PQ block archive")
+                    .is_some()
+            {
                 return slot;
             }
         }

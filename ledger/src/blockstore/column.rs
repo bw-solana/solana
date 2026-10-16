@@ -25,6 +25,12 @@ pub(crate) const DEPRECATED_TRANSACTION_STATUS_INDEX_NAME: &str = "transaction_s
 // not grow unbounded.
 
 pub mod columns {
+    /// Authenticated Quantumglow block witnesses and durable recovery journal.
+    /// Keys are (slot, 48-byte PQ block commitment); (0, zero) is the journal.
+    /// Records are retained independently of classical shred cleanup because
+    /// removing them before a certified checkpoint would make PQ replay unsafe.
+    #[derive(Debug)]
+    pub struct ExperimentalPq;
     // This avoids relatively obvious `super::` qualifications required for all non-trivial type
     // references in the column doc-comments.
     #[cfg(doc)]
@@ -363,6 +369,37 @@ impl<T: SlotColumn> Column for T {
     fn as_index(slot: Slot) -> u64 {
         slot
     }
+}
+
+impl Column for columns::ExperimentalPq {
+    type Index = (Slot, [u8; 48]);
+    type Key = [u8; 56];
+
+    fn key((slot, commitment): &Self::Index) -> Self::Key {
+        let mut key = [0; 56];
+        key[..8].copy_from_slice(&slot.to_be_bytes());
+        key[8..].copy_from_slice(commitment);
+        key
+    }
+
+    fn index(key: &[u8]) -> Self::Index {
+        (
+            Slot::from_be_bytes(key[..8].try_into().expect("PQ record slot")),
+            key[8..56].try_into().expect("PQ record commitment"),
+        )
+    }
+
+    fn slot(_index: Self::Index) -> Slot {
+        Slot::MAX
+    }
+
+    fn as_index(slot: Slot) -> Self::Index {
+        (slot, [0; 48])
+    }
+}
+
+impl ColumnName for columns::ExperimentalPq {
+    const NAME: &'static str = "experimental_pq";
 }
 
 impl Column for columns::TransactionStatus {

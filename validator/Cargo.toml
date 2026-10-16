@@ -21,6 +21,9 @@ rustdoc-args = ["--cfg=docsrs"]
 agave-unstable-api = []
 
 [dependencies]
+agave-pq-crypto = { path = "../pq-crypto" }
+anyhow = { workspace = true }
+base64 = { workspace = true }
 agave-cpu-utils = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-logger = { workspace = true }
@@ -48,6 +51,7 @@ num_cpus = { workspace = true }
 qualifier_attr = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
+reqwest = { workspace = true, features = ["blocking", "json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -59,15 +63,19 @@ solana-cli-output = { workspace = true }
 solana-clock = { workspace = true }
 solana-commitment-config = { workspace = true }
 solana-core = { workspace = true }
+solana-compute-budget-interface = { workspace = true }
 solana-download-utils = { workspace = true }
 solana-entry = { workspace = true }
 solana-epoch-schedule = { workspace = true }
 solana-faucet = { workspace = true }
+solana-fee-calculator = { workspace = true }
 solana-genesis-utils = { workspace = true }
+solana-genesis-config = { workspace = true, features = ["serde"] }
 solana-geyser-plugin-manager = { workspace = true }
 solana-gossip = { workspace = true }
 solana-hash = { workspace = true }
 solana-inflation = { workspace = true }
+solana-instruction = { workspace = true }
 solana-keypair = { workspace = true }
 solana-ledger = { workspace = true }
 solana-message = { workspace = true }
@@ -87,8 +95,11 @@ solana-sdk-ids = { workspace = true }
 solana-send-transaction-service = { workspace = true }
 solana-signer = { workspace = true }
 solana-storage-bigtable = { workspace = true }
+solana-stake-interface = { workspace = true }
 solana-streamer = { workspace = true }
 solana-system-interface = { workspace = true }
+solana-transaction = { workspace = true }
+wincode = { workspace = true }
 solana-test-validator = { workspace = true }
 solana-turbine = { workspace = true }
 solana-unified-scheduler-pool = { workspace = true }
@@ -98,6 +109,13 @@ solana-vote-program = { workspace = true }
 symlink = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+solana-program-option = { workspace = true }
+solana-program-pack = { workspace = true }
+solana-program-binaries = { workspace = true }
+spl-token-interface = { workspace = true }
+spl-associated-token-account-interface = { workspace = true }
+spl-generic-token = { workspace = true }
+sha2 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 caps = { workspace = true }
@@ -113,8 +131,6 @@ pretty_assertions = { workspace = true }
 scopeguard = { workspace = true }
 solana-account-decoder = { path = "../account-decoder", features = ["agave-unstable-api"] }
 solana-core = { path = "../core", features = ["agave-unstable-api", "dev-context-only-utils"] }
-solana-program-option = { workspace = true }
-solana-program-pack = { workspace = true }
 solana-runtime = { path = "../runtime", features = ["agave-unstable-api", "dev-context-only-utils"] }
 solana-time-utils = { workspace = true }
 tempfile = { workspace = true }

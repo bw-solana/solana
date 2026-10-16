@@ -1,0 +1,48 @@
+[package]
+name = "agave-pq-crypto"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+publish = false
+
+[dependencies]
+hkdf = "0.12.4"
+openssl = { workspace = true }
+pqcrypto-falcon = { version = "=0.4.1", features = ["avx2"] }
+pqcrypto-traits = "=0.3.5"
+rand = "0.8.6"
+sha2 = "=0.10.9"
+zeroize = { workspace = true }
+thiserror = "2"
+solana-pubkey = { version = "4.4.0", features = ["curve25519"] }
+solana-account = "5.1.0"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+rayon = "1.11"
+reed-solomon-erasure = "=6.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+p3-air = "=0.7.0"
+p3-batch-stark = { version = "=0.7.0", features = ["parallel"] }
+p3-challenger = "=0.7.0"
+p3-commit = "=0.7.0"
+p3-dft = { version = "=0.7.0", features = ["parallel"] }
+p3-field = "=0.7.0"
+p3-fri = "=0.7.0"
+p3-goldilocks = "=0.7.0"
+p3-lookup = "=0.7.0"
+p3-matrix = "=0.7.0"
+p3-merkle-tree = "=0.7.0"
+p3-symmetric = "=0.7.0"
+p3-uni-stark = "=0.7.0"
+postcard = { version = "1", features = ["alloc"] }
+rand_p3 = { package = "rand", version = "0.10.2" }
+num-bigint = "=0.4.6"
+num-traits = "=0.2.19"
+
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

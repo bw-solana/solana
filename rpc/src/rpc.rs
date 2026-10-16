@@ -183,6 +183,20 @@ pub struct JsonRpcConfig {
     pub scan_results_limit_bytes: Option<usize>,
     /// Disable the health check, used for tests and TestValidator
     pub disable_health_check: bool,
+    /// Explicit actual-Bank PQ ingress. It replaces classical TPU forwarding.
+    pub experimental_pq: Option<Arc<PqRpcIngress>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PqRpcIngress {
+    pub sender: Sender<Vec<u8>>,
+    pub status: Arc<RwLock<serde_json::Value>>,
+}
+
+impl PartialEq for PqRpcIngress {
+    fn eq(&self, other: &Self) -> bool {
+        self.sender.same_channel(&other.sender)
+    }
 }
 
 impl Default for JsonRpcConfig {
@@ -204,6 +218,7 @@ impl Default for JsonRpcConfig {
             max_request_body_size: Option::default(),
             scan_results_limit_bytes: Option::default(),
             disable_health_check: Default::default(),
+            experimental_pq: None,
         }
     }
 }
@@ -1364,6 +1379,21 @@ impl JsonRpcRequestProcessor {
     }
 
     fn check_blockstore_writes_complete(&self, slot: Slot) -> Result<()> {
+        // Native PQ publishes its root only after the certified RPC archive and
+        // status rows are durably written. The classical status-service counter
+        // is inactive in this mode; the archive reader still checks its root
+        // binding and complete transaction metadata before returning a block.
+        if self.config.experimental_pq.is_some()
+            && self.blockstore.is_root(slot)
+            && slot
+                <= self
+                    .block_commitment_cache
+                    .read()
+                    .unwrap()
+                    .highest_super_majority_root()
+        {
+            return Ok(());
+        }
         if slot
             > self
                 .max_complete_transaction_status_slot
@@ -1736,6 +1766,11 @@ impl JsonRpcRequestProcessor {
         commitment: Option<CommitmentConfig>,
     ) -> Result<Option<transaction::Result<()>>> {
         let bank = self.bank(commitment);
+        if self.config.experimental_pq.is_some() {
+            return Ok(self
+                .get_transaction_status(signature, &bank)
+                .map(|status| status.status));
+        }
         Ok(bank
             .get_signature_status_slot(&signature)
             .map(|(_, status)| status))
@@ -1763,6 +1798,45 @@ impl JsonRpcRequestProcessor {
             min_context_slot: config.min_context_slot,
         })?;
         let mut statuses: Vec<Option<TransactionStatus>> = vec![];
+
+        if self.config.experimental_pq.is_some() {
+            let published_root = self
+                .block_commitment_cache
+                .read()
+                .unwrap()
+                .highest_super_majority_root();
+            // Discover the archived ledger range once for this exact-identity
+            // batch. Keep native status out of the truncated legacy Bank cache.
+            let archived = self
+                .blockstore
+                .get_experimental_pq_rooted_transaction_statuses(&signatures, published_root)
+                .map_err(|_| Error::internal_error())?;
+            for (signature, archived) in signatures.iter().zip(archived) {
+                let status = if let Some((slot, metadata)) = archived {
+                    let err = metadata.status.clone().err();
+                    Some(TransactionStatus {
+                        slot,
+                        status: metadata.status,
+                        confirmations: None,
+                        err,
+                        confirmation_status: Some(TransactionConfirmationStatus::Finalized),
+                    })
+                } else if search_transaction_history {
+                    if let Some(bigtable_ledger_storage) = &self.bigtable_ledger_storage {
+                        bigtable_ledger_storage
+                            .get_signature_status(signature)
+                            .await
+                            .ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                statuses.push(status);
+            }
+            return Ok(new_response(&bank, statuses));
+        }
 
         for signature in signatures {
             let status = if let Some(status) = self.get_transaction_status(signature, &bank) {
@@ -1813,6 +1887,33 @@ impl JsonRpcRequestProcessor {
         signature: Signature,
         bank: &Bank,
     ) -> Option<TransactionStatus> {
+        if self.config.experimental_pq.is_some() {
+            // Native identifiers contain a complete 48-byte commitment. The
+            // legacy Bank telemetry cache keeps only a twenty-byte substring;
+            // an alias there must never be reported as this transaction's
+            // finality. Native archives use the exact 64-byte identifier.
+            let (slot, metadata) = self
+                .blockstore
+                .get_rooted_transaction_status(signature)
+                .ok()??;
+            if slot
+                > self
+                    .block_commitment_cache
+                    .read()
+                    .unwrap()
+                    .highest_super_majority_root()
+            {
+                return None;
+            }
+            let err = metadata.status.clone().err();
+            return Some(TransactionStatus {
+                slot,
+                status: metadata.status,
+                confirmations: None,
+                err,
+                confirmation_status: Some(TransactionConfirmationStatus::Finalized),
+            });
+        }
         let (slot, status) = bank.get_signature_status_slot(&signature)?;
 
         let optimistically_confirmed_bank = self.bank(Some(CommitmentConfig::confirmed()));
@@ -2859,6 +2960,24 @@ fn _send_transaction(
     durable_nonce_info: Option<(Pubkey, Hash)>,
     max_retries: Option<usize>,
 ) -> Result<String> {
+    if let Some(ingress) = &meta.config.experimental_pq {
+        ingress.sender.try_send(wire_transaction).map_err(|error| {
+            let message = match error {
+                crossbeam_channel::TrySendError::Full(_) => {
+                    "PQ transaction ingress is full; retry the same signed transaction"
+                }
+                crossbeam_channel::TrySendError::Disconnected(_) => {
+                    "PQ transaction ingress is unavailable"
+                }
+            };
+            Error {
+                code: error::ErrorCode::ServerError(-32050),
+                message: message.into(),
+                data: None,
+            }
+        })?;
+        return Ok(signature.to_string());
+    }
     let transaction_info = TransactionInfo::new(
         message_hash,
         signature,
@@ -3730,6 +3849,9 @@ pub mod rpc_full {
             config: Option<RpcSendTransactionConfig>,
         ) -> Result<String>;
 
+        #[rpc(meta, name = "getExperimentalPqStatus")]
+        fn get_experimental_pq_status(&self, meta: Self::Metadata) -> Result<serde_json::Value>;
+
         #[rpc(meta, name = "simulateTransaction")]
         fn simulate_transaction(
             &self,
@@ -3834,6 +3956,19 @@ pub mod rpc_full {
     pub struct FullImpl;
     impl Full for FullImpl {
         type Metadata = JsonRpcRequestProcessor;
+
+        fn get_experimental_pq_status(&self, meta: Self::Metadata) -> Result<serde_json::Value> {
+            let ingress = meta
+                .config
+                .experimental_pq
+                .as_ref()
+                .ok_or_else(Error::method_not_found)?;
+            ingress
+                .status
+                .read()
+                .map(|status| status.clone())
+                .map_err(|_| Error::internal_error())
+        }
 
         fn get_recent_performance_samples(
             &self,
@@ -3961,6 +4096,12 @@ pub mod rpc_full {
             debug!("request_airdrop rpc request received");
             trace!("request_airdrop id={pubkey_str} lamports={lamports} config: {config:?}");
 
+            if meta.config.experimental_pq.is_some() {
+                return Err(Error::invalid_params(
+                    "requestAirdrop uses the classical faucet and is disabled in PQ mode",
+                ));
+            }
+
             let faucet_addr = meta.config.faucet_addr.ok_or_else(Error::invalid_request)?;
             let pubkey = verify_pubkey(&pubkey_str)?;
 
@@ -4028,8 +4169,9 @@ pub mod rpc_full {
                     "unsupported encoding: {tx_encoding}. Supported encodings: base58, base64"
                 ))
             })?;
+            let pq_mode = meta.config.experimental_pq.is_some();
             let (wire_transaction, unsanitized_tx) =
-                decode_and_deserialize::<VersionedTransaction>(data, binary_encoding)?;
+                decode_rpc_transaction(data, binary_encoding, pq_mode)?;
 
             let preflight_commitment = if skip_preflight {
                 Some(CommitmentConfig::processed())
@@ -4040,6 +4182,12 @@ pub mod rpc_full {
                 commitment: preflight_commitment,
                 min_context_slot,
             })?;
+
+            if pq_mode {
+                preflight_bank
+                    .verify_pq_transaction_for_ingress(&unsanitized_tx)
+                    .map_err(|_| RpcCustomError::TransactionSignatureVerificationFailure)?;
+            }
 
             let transaction = sanitize_transaction(
                 unsanitized_tx,
@@ -4067,7 +4215,11 @@ pub mod rpc_full {
             }
 
             if !skip_preflight {
-                let verification_error = transaction.verify().err();
+                let verification_error = if pq_mode {
+                    None
+                } else {
+                    transaction.verify().err()
+                };
 
                 if verification_error.is_none() && !meta.config.skip_preflight_health_check {
                     match meta.health.check() {
@@ -4175,8 +4327,8 @@ pub mod rpc_full {
                     "unsupported encoding: {tx_encoding}. Supported encodings: base58, base64"
                 ))
             })?;
-            let (_, mut unsanitized_tx) =
-                decode_and_deserialize::<VersionedTransaction>(data, binary_encoding)?;
+            let pq_mode = meta.config.experimental_pq.is_some();
+            let (_, mut unsanitized_tx) = decode_rpc_transaction(data, binary_encoding, pq_mode)?;
 
             let bank = &*meta.get_bank_with_config(RpcContextConfig {
                 commitment,
@@ -4184,6 +4336,12 @@ pub mod rpc_full {
             })?;
             let mut blockhash: Option<RpcBlockhash> = None;
             if replace_recent_blockhash {
+                if pq_mode {
+                    return Err(Error::invalid_params(
+                        "replaceRecentBlockhash changes the authenticated PQ message; sign the \
+                         replacement transaction",
+                    ));
+                }
                 if sig_verify {
                     return Err(Error::invalid_params(
                         "sigVerify may not be used with replaceRecentBlockhash",
@@ -4202,10 +4360,18 @@ pub mod rpc_full {
                 });
             }
 
+            let pq_verification_error = pq_mode
+                .then(|| {
+                    bank.verify_pq_transaction_for_ingress(&unsanitized_tx)
+                        .err()
+                })
+                .flatten();
             let transaction =
                 sanitize_transaction(unsanitized_tx, bank, bank.get_reserved_account_keys())?;
 
-            let verification_error = if sig_verify {
+            let verification_error = if pq_mode {
+                pq_verification_error
+            } else if sig_verify {
                 transaction.verify().err()
             } else {
                 None
@@ -4617,14 +4783,70 @@ where
         .map(|output| (wire_output, output))
 }
 
+fn decode_rpc_transaction(
+    encoded: String,
+    encoding: TransactionBinaryEncoding,
+    pq_mode: bool,
+) -> Result<(Vec<u8>, VersionedTransaction)> {
+    if !pq_mode {
+        return decode_and_deserialize(encoded, encoding);
+    }
+    use solana_runtime::pq::MAX_TRANSACTION_BYTES;
+    const MAX_PQ_BASE64_BYTES: usize = MAX_TRANSACTION_BYTES.div_ceil(3) * 4;
+    const MAX_PQ_BASE58_BYTES: usize = MAX_TRANSACTION_BYTES * 2;
+    let encoded_limit = match encoding {
+        TransactionBinaryEncoding::Base64 => MAX_PQ_BASE64_BYTES,
+        TransactionBinaryEncoding::Base58 => MAX_PQ_BASE58_BYTES,
+    };
+    if encoded.len() > encoded_limit {
+        return Err(Error::invalid_params(format!(
+            "encoded PQ transaction exceeds {encoded_limit} bytes"
+        )));
+    }
+    let mut wire = vec![0; MAX_TRANSACTION_BYTES];
+    let size = match encoding {
+        TransactionBinaryEncoding::Base64 => BASE64_STANDARD
+            .decode_slice(encoded.as_bytes(), &mut wire)
+            .map_err(|error| {
+                Error::invalid_params(format!(
+                    "invalid or oversized PQ base64 transaction: {error}"
+                ))
+            })?,
+        TransactionBinaryEncoding::Base58 => {
+            bs58::decode(encoded).onto(&mut wire[..]).map_err(|error| {
+                Error::invalid_params(format!(
+                    "invalid or oversized PQ base58 transaction: {error}"
+                ))
+            })?
+        }
+    };
+    wire.truncate(size);
+    let transaction: VersionedTransaction = wincode::deserialize(&wire)
+        .map_err(|error| Error::invalid_params(format!("invalid PQ transaction: {error}")))?;
+    if wincode::serialize(&transaction).map_err(|_| Error::internal_error())? != wire {
+        return Err(Error::invalid_params(
+            "PQ transaction must use canonical wire encoding",
+        ));
+    }
+    Ok((wire, transaction))
+}
+
 fn sanitize_transaction(
     transaction: VersionedTransaction,
     address_loader: impl AddressLoader,
     reserved_account_keys: &HashSet<Pubkey>,
 ) -> Result<RuntimeTransaction<SanitizedTransaction>> {
+    let message_hash = if solana_runtime::pq::is_pq_transaction(&transaction) {
+        MessageHash::Precomputed(
+            solana_runtime::pq::canonical_message_hash(&transaction)
+                .map_err(|err| Error::invalid_params(format!("invalid PQ transaction: {err}")))?,
+        )
+    } else {
+        MessageHash::Compute
+    };
     RuntimeTransaction::try_create(
         transaction,
-        MessageHash::Compute,
+        message_hash,
         None,
         address_loader,
         reserved_account_keys,
@@ -7729,6 +7951,561 @@ pub mod tests {
             mint_keypair,
             Arc::new(voting_keypair),
         )
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    mod pq_rpc_tests {
+        use {
+            super::*,
+            agave_pq_crypto::{
+                auth::{AuthRecord, Origin},
+                crypto::FalconKeypair,
+            },
+            crossbeam_channel::bounded,
+            solana_runtime::pq::{
+                CONFIG_ADDRESS, Config as PqConfig, MAX_TRANSACTION_BYTES, PROGRAM_ID,
+                authenticate_instruction, canonical_message_hash, policy_address, sign_transaction,
+            },
+            solana_transaction_status::TransactionStatusMeta,
+        };
+
+        type PqRpcFixture = (
+            RpcHandler,
+            Receiver<Vec<u8>>,
+            Vec<(Pubkey, FalconKeypair)>,
+            PqConfig,
+            Pubkey,
+        );
+
+        fn start_pq(extra_signers: usize, capacity: usize) -> PqRpcFixture {
+            let mut genesis = create_genesis_config(TEST_MINT_LAMPORTS);
+            genesis.genesis_config.rent = solana_rent::Rent::default();
+            let config = PqConfig {
+                chain_id: [0x23; 32],
+                migration_context: [0x29; 32],
+                cutoff_slot: 0,
+            };
+            genesis.genesis_config.accounts.insert(
+                CONFIG_ADDRESS,
+                config.account(genesis.genesis_config.rent.minimum_balance(80)),
+            );
+            let mut authorities = vec![(genesis.mint_keypair.pubkey(), FalconKeypair::generate())];
+            for _ in 0..extra_signers {
+                let authority = Pubkey::new_unique();
+                genesis.genesis_config.accounts.insert(
+                    authority,
+                    Account {
+                        lamports: 1_000_000_000,
+                        owner: system_program::id(),
+                        ..Account::default()
+                    },
+                );
+                authorities.push((authority, FalconKeypair::generate()));
+            }
+            for (authority, key) in &authorities {
+                let record = AuthRecord::new(
+                    authority.to_bytes(),
+                    key.public_key(),
+                    Origin::FreshIdentity,
+                );
+                let data = record.encode();
+                genesis.genesis_config.accounts.insert(
+                    policy_address(authority),
+                    Account {
+                        lamports: genesis.genesis_config.rent.minimum_balance(data.len()),
+                        data,
+                        owner: PROGRAM_ID,
+                        executable: false,
+                        rent_epoch: u64::MAX,
+                    },
+                );
+            }
+            let recipient = Pubkey::new_unique();
+            genesis.genesis_config.accounts.insert(
+                recipient,
+                Account {
+                    lamports: 1_000_000_000,
+                    owner: system_program::id(),
+                    ..Account::default()
+                },
+            );
+            let (sender, receiver) = bounded(capacity);
+            let rpc = RpcHandler::start_with_config_and_genesis(
+                JsonRpcConfig {
+                    skip_preflight_health_check: true,
+                    enable_rpc_transaction_history: true,
+                    experimental_pq: Some(Arc::new(PqRpcIngress {
+                        sender,
+                        status: Arc::new(RwLock::new(json!({"experimental_pq": true, "slot": 0}))),
+                    })),
+                    ..JsonRpcConfig::default_for_test()
+                },
+                genesis,
+            );
+            (rpc, receiver, authorities, config, recipient)
+        }
+
+        fn signed(
+            rpc: &RpcHandler,
+            authorities: &[(Pubkey, FalconKeypair)],
+            config: &PqConfig,
+            recipient: &Pubkey,
+        ) -> VersionedTransaction {
+            let keys: Vec<_> = authorities.iter().map(|(identity, _)| *identity).collect();
+            let mut instructions = vec![authenticate_instruction(&keys)];
+            instructions.extend(
+                authorities
+                    .iter()
+                    .map(|(identity, _)| system_instruction::transfer(identity, recipient, 42)),
+            );
+            sign_transaction(
+                VersionedMessage::Legacy(Message::new_with_blockhash(
+                    &instructions,
+                    Some(&keys[0]),
+                    &rpc.working_bank().last_blockhash(),
+                )),
+                config,
+                &authorities.iter().map(|(_, key)| key).collect::<Vec<_>>(),
+            )
+            .unwrap()
+        }
+
+        fn send(rpc: &RpcHandler, tx: &VersionedTransaction, skip_preflight: bool) -> Response {
+            rpc.handle_request_sync(create_test_request(
+                "sendTransaction",
+                Some(json!([
+                    BASE64_STANDARD.encode(wincode::serialize(tx).unwrap()),
+                    {"encoding": "base64", "skipPreflight": skip_preflight}
+                ])),
+            ))
+        }
+
+        #[test]
+        fn pq_rpc_authenticates_even_when_preflight_is_skipped_and_routes_without_fallback() {
+            let (rpc, receiver, authorities, config, recipient) = start_pq(0, 2);
+            let tx = signed(&rpc, &authorities, &config, &recipient);
+            let id: String = parse_success_result(send(&rpc, &tx, true));
+            assert_eq!(id, tx.signatures[0].to_string());
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+                wincode::serialize(&tx).unwrap()
+            );
+
+            let wrong_key = vec![(authorities[0].0, FalconKeypair::generate())];
+            let unauthorized = signed(&rpc, &wrong_key, &config, &recipient);
+            parse_failure_response(send(&rpc, &unauthorized, true));
+            assert!(receiver.is_empty());
+            let mut tampered = tx.clone();
+            tampered.signatures[0] = Signature::default();
+            parse_failure_response(send(&rpc, &tampered, true));
+            assert!(receiver.is_empty());
+
+            let classical = solana_system_transaction::transfer(
+                &rpc.mint_keypair,
+                &recipient,
+                42,
+                rpc.working_bank().last_blockhash(),
+            );
+            parse_failure_response(send(&rpc, &classical.into(), true));
+            assert!(receiver.is_empty());
+            let status: serde_json::Value = parse_success_result(
+                rpc.handle_request_sync(create_test_request("getExperimentalPqStatus", None)),
+            );
+            assert_eq!(status, json!({"experimental_pq": true, "slot": 0}));
+        }
+
+        #[test]
+        fn pq_rpc_bounded_ingress_preserves_fifo_and_retries_the_same_authenticated_wire() {
+            let (rpc, receiver, authorities, config, recipient) = start_pq(0, 3);
+            let transactions = (42..47)
+                .map(|amount| {
+                    sign_transaction(
+                        VersionedMessage::Legacy(Message::new_with_blockhash(
+                            &[
+                                authenticate_instruction(&[authorities[0].0]),
+                                system_instruction::transfer(&authorities[0].0, &recipient, amount),
+                            ],
+                            Some(&authorities[0].0),
+                            &rpc.working_bank().last_blockhash(),
+                        )),
+                        &config,
+                        &[&authorities[0].1],
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let wires = transactions
+                .iter()
+                .map(|tx| wincode::serialize(tx).unwrap())
+                .collect::<Vec<_>>();
+            for tx in &transactions[..3] {
+                let id: String = parse_success_result(send(&rpc, tx, true));
+                assert_eq!(id, tx.signatures[0].to_string());
+            }
+            let full = parse_failure_response(send(&rpc, &transactions[3], true));
+            assert_eq!(full.0, -32050);
+            assert!(full.1.contains("retry the same signed transaction"));
+            assert_eq!(receiver.len(), 3);
+
+            // Authentication still precedes queue admission, even at capacity.
+            let wrong_key = vec![(authorities[0].0, FalconKeypair::generate())];
+            let unauthorized = signed(&rpc, &wrong_key, &config, &recipient);
+            let forged = parse_failure_response(send(&rpc, &unauthorized, true));
+            assert_ne!(forged.0, -32050);
+            assert_eq!(receiver.len(), 3);
+
+            assert_eq!(receiver.recv().unwrap(), wires[0]);
+            let retried_id: String = parse_success_result(send(&rpc, &transactions[3], true));
+            assert_eq!(retried_id, transactions[3].signatures[0].to_string());
+            assert_eq!(receiver.len(), 3);
+            assert_eq!(receiver.recv().unwrap(), wires[1]);
+            assert_eq!(receiver.recv().unwrap(), wires[2]);
+            assert_eq!(receiver.recv().unwrap(), wires[3]);
+            assert!(receiver.is_empty());
+
+            // Successful RPC acknowledgement means a bounded enqueue; it has
+            // not executed or charged the Bank. Core's genuine native pressure
+            // regression separately exercises retained admission and commit.
+            assert_eq!(rpc.working_bank().get_balance(&recipient), 1_000_000_000);
+            assert_eq!(rpc.working_bank().transaction_count(), 0);
+            let last_id: String = parse_success_result(send(&rpc, &transactions[4], true));
+            assert_eq!(last_id, transactions[4].signatures[0].to_string());
+            assert_eq!(receiver.recv().unwrap(), wires[4]);
+        }
+
+        #[test]
+        fn pq_rpc_cached_math_does_not_authorize_after_policy_key_rotation() {
+            let (rpc, receiver, authorities, config, recipient) = start_pq(0, 2);
+            let old = signed(&rpc, &authorities, &config, &recipient);
+            let _: String = parse_success_result(send(&rpc, &old, true));
+            let queued: VersionedTransaction =
+                wincode::deserialize(&receiver.recv().unwrap()).unwrap();
+            let before_hits = agave_pq_crypto::crypto::falcon_verification_cache_stats().hits;
+            rpc.working_bank()
+                .verify_pq_transaction_for_ingress(&old)
+                .unwrap();
+            assert!(agave_pq_crypto::crypto::falcon_verification_cache_stats().hits > before_hits);
+            let replacement = FalconKeypair::generate();
+            let address = policy_address(&authorities[0].0);
+            let mut account = rpc.working_bank().get_account(&address).unwrap();
+            account.set_data_from_slice(
+                &AuthRecord::new(
+                    authorities[0].0.to_bytes(),
+                    replacement.public_key(),
+                    Origin::LegacySignature,
+                )
+                .encode(),
+            );
+            rpc.working_bank().store_account(&address, &account);
+            let rejected = rpc.working_bank().process_transaction_with_metadata(queued);
+            assert!(rejected.is_err() || rejected.unwrap().status.is_err());
+            assert_eq!(rpc.working_bank().get_balance(&recipient), 1_000_000_000);
+            parse_failure_response(send(&rpc, &old, true));
+            assert!(receiver.is_empty());
+            let current = signed(
+                &rpc,
+                &[(authorities[0].0, replacement)],
+                &config,
+                &recipient,
+            );
+            let _: String = parse_success_result(send(&rpc, &current, true));
+            let queued: VersionedTransaction =
+                wincode::deserialize(&receiver.recv().unwrap()).unwrap();
+            assert_eq!(
+                rpc.working_bank()
+                    .process_transaction_with_metadata(queued)
+                    .unwrap()
+                    .status,
+                Ok(())
+            );
+            assert_eq!(rpc.working_bank().get_balance(&recipient), 1_000_000_042);
+        }
+
+        #[test]
+        fn pq_rpc_serves_older_native_receipts_and_blocks_with_no_classical_status_counter() {
+            let (rpc, _receiver, authorities, config, recipient) = start_pq(0, 2);
+            let parent = rpc.working_bank();
+            let child = Bank::new_from_parent(parent.clone(), *parent.leader(), 1);
+            let child = rpc
+                .bank_forks
+                .write()
+                .unwrap()
+                .insert(child)
+                .clone_without_scheduler();
+            let transaction = signed(&rpc, &authorities, &config, &recipient);
+            let signature = transaction.signatures[0];
+            let mut alias_bytes = signature.as_ref().to_vec();
+            alias_bytes[63] ^= 1;
+            let alias = Signature::from(<[u8; 64]>::try_from(alias_bytes.as_slice()).unwrap());
+            child.status_cache.write().unwrap().insert(
+                &child.last_blockhash(),
+                alias,
+                child.slot(),
+                Ok(()),
+            );
+            assert!(child.get_signature_status(&signature).is_some());
+            let before: Value = parse_success_result(rpc.handle_request_sync(create_test_request(
+                "getSignatureStatuses",
+                Some(json!([[signature.to_string()],{"searchTransactionHistory":false}])),
+            )));
+            assert!(before["value"][0].is_null());
+            let committed = child
+                .process_transaction_with_metadata(transaction.clone())
+                .unwrap();
+            assert_eq!(committed.status, Ok(()));
+            let status = TransactionStatusMeta {
+                status: committed.status,
+                fee: committed.fee_details.total_fee(),
+                log_messages: committed.log_messages,
+                compute_units_consumed: Some(committed.executed_units),
+                ..TransactionStatusMeta::default()
+            };
+            let keys = transaction
+                .message
+                .static_account_keys()
+                .iter()
+                .map(|key| (*key, false))
+                .collect();
+            child.freeze();
+            rpc.blockstore
+                .put_experimental_pq_block(
+                    1,
+                    [0x61; 48],
+                    b"caller-authenticated-native-test-witness",
+                )
+                .unwrap();
+            rpc.blockstore.set_roots([1].iter()).unwrap();
+            rpc.blockstore
+                .put_experimental_pq_rpc_block(
+                    1,
+                    [0x61; 48],
+                    0,
+                    parent.last_blockhash(),
+                    child.last_blockhash(),
+                    1,
+                    child.clock().unix_timestamp,
+                    &[(transaction.clone(), status, keys)],
+                )
+                .unwrap();
+            let later = Bank::new_from_parent(child.clone(), *child.leader(), 2);
+            let later = rpc
+                .bank_forks
+                .write()
+                .unwrap()
+                .insert(later)
+                .clone_without_scheduler();
+            later.freeze();
+            rpc.blockstore
+                .put_experimental_pq_block(
+                    2,
+                    [0x62; 48],
+                    b"caller-authenticated-native-test-witness",
+                )
+                .unwrap();
+            rpc.blockstore.set_roots([2].iter()).unwrap();
+            rpc.blockstore
+                .put_experimental_pq_rpc_block(
+                    2,
+                    [0x62; 48],
+                    1,
+                    child.last_blockhash(),
+                    later.last_blockhash(),
+                    2,
+                    later.clock().unix_timestamp,
+                    &[],
+                )
+                .unwrap();
+            rpc.bank_forks.write().unwrap().set_root(2, None, Some(2));
+            rpc.block_commitment_cache
+                .write()
+                .unwrap()
+                .set_all_slots(2, 2);
+            assert_eq!(
+                rpc.max_complete_transaction_status_slot
+                    .load(Ordering::SeqCst),
+                0
+            );
+            let receipt:Value = parse_success_result(rpc.handle_request_sync(create_test_request("getTransaction",Some(json!([signature.to_string(),{"encoding":"base64","commitment":"finalized","maxSupportedTransactionVersion":0}])))));
+            assert_eq!(receipt["slot"], 1);
+            assert_eq!(
+                receipt["transaction"][0],
+                BASE64_STANDARD.encode(wincode::serialize(&transaction).unwrap())
+            );
+            assert!(receipt["meta"]["err"].is_null());
+            let block:Value = parse_success_result(rpc.handle_request_sync(create_test_request("getBlock",Some(json!([1,{"encoding":"base64","commitment":"finalized","maxSupportedTransactionVersion":0}])))));
+            assert_eq!(block["transactions"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                block["transactions"][0]["transaction"][0],
+                receipt["transaction"][0]
+            );
+            let statuses:Value = parse_success_result(rpc.handle_request_sync(create_test_request("getSignatureStatuses",Some(json!([[signature.to_string(),alias.to_string()],{"searchTransactionHistory":false}])))));
+            assert_eq!(statuses["value"][0]["confirmationStatus"], "finalized");
+            assert_eq!(statuses["value"][0]["slot"], 1);
+            assert!(statuses["value"][1].is_null());
+            let batch = (0..256)
+                .map(|index| {
+                    if index % 2 == 0 {
+                        signature.to_string()
+                    } else {
+                        alias.to_string()
+                    }
+                })
+                .collect::<Vec<_>>();
+            for search_history in [false, true] {
+                let statuses: Value =
+                    parse_success_result(rpc.handle_request_sync(create_test_request(
+                        "getSignatureStatuses",
+                        Some(json!([batch,{"searchTransactionHistory":search_history}])),
+                    )));
+                let rows = statuses["value"].as_array().unwrap();
+                assert_eq!(rows.len(), 256);
+                for (index, row) in rows.iter().enumerate() {
+                    if index % 2 == 0 {
+                        assert_eq!(row["slot"], 1);
+                        assert_eq!(row["confirmationStatus"], "finalized");
+                    } else {
+                        assert!(row.is_null());
+                    }
+                }
+            }
+            // A durable native root is not visible until account publication.
+            rpc.block_commitment_cache
+                .write()
+                .unwrap()
+                .set_all_slots(0, 0);
+            let unpublished: Value =
+                parse_success_result(rpc.handle_request_sync(create_test_request(
+                    "getSignatureStatuses",
+                    Some(json!([[signature.to_string()],{"searchTransactionHistory":true}])),
+                )));
+            assert!(unpublished["value"][0].is_null());
+            rpc.block_commitment_cache
+                .write()
+                .unwrap()
+                .set_all_slots(2, 2);
+            rpc.blockstore.set_roots([3].iter()).unwrap();
+            assert!(rpc.meta.check_blockstore_writes_complete(3).is_err());
+        }
+
+        #[test]
+        fn pq_rpc_returns_backpressure_and_disconnection_errors() {
+            let (rpc, receiver, authorities, config, recipient) = start_pq(0, 1);
+            let tx = signed(&rpc, &authorities, &config, &recipient);
+            let _: String = parse_success_result(send(&rpc, &tx, true));
+            let (_, error) = parse_failure_response(send(&rpc, &tx, true));
+            assert!(error.contains("ingress is full"));
+            assert_eq!(receiver.len(), 1);
+            drop(receiver);
+            let (_, error) = parse_failure_response(send(&rpc, &tx, true));
+            assert!(error.contains("ingress is unavailable"));
+        }
+
+        #[test]
+        fn pq_rpc_canonical_hash_preserves_authoritative_replay_protection() {
+            let (rpc, receiver, authorities, config, recipient) = start_pq(0, 2);
+            let first = signed(&rpc, &authorities, &config, &recipient);
+            let second = signed(&rpc, &authorities, &config, &recipient);
+            assert_ne!(first.signatures, second.signatures);
+            assert_eq!(
+                canonical_message_hash(&first).unwrap(),
+                canonical_message_hash(&second).unwrap()
+            );
+            let sanitized = sanitize_transaction(
+                first.clone(),
+                rpc.working_bank().as_ref(),
+                rpc.working_bank().get_reserved_account_keys(),
+            )
+            .unwrap();
+            assert_eq!(
+                *sanitized.message_hash(),
+                canonical_message_hash(&first).unwrap()
+            );
+            let _: String = parse_success_result(send(&rpc, &first, true));
+            let queued: VersionedTransaction =
+                wincode::deserialize(&receiver.recv().unwrap()).unwrap();
+            let result = rpc
+                .working_bank()
+                .process_transaction_with_metadata(queued)
+                .unwrap();
+            assert_eq!(result.status, Ok(()));
+            assert_eq!(rpc.working_bank().get_balance(&recipient), 1_000_000_042);
+            let _: String = parse_success_result(send(&rpc, &second, true));
+            let replay: VersionedTransaction =
+                wincode::deserialize(&receiver.recv().unwrap()).unwrap();
+            assert_eq!(
+                rpc.working_bank()
+                    .process_transaction_with_metadata(replay)
+                    .unwrap_err(),
+                TransactionError::AlreadyProcessed
+            );
+            assert_eq!(rpc.working_bank().get_balance(&recipient), 1_000_000_042);
+        }
+
+        #[test]
+        fn pq_rpc_simulation_checks_falcon_with_sigverify_disabled() {
+            let (rpc, _receiver, authorities, config, recipient) = start_pq(0, 2);
+            let valid = signed(&rpc, &authorities, &config, &recipient);
+            let invalid = signed(
+                &rpc,
+                &[(authorities[0].0, FalconKeypair::generate())],
+                &config,
+                &recipient,
+            );
+            rpc.working_bank().freeze();
+            for sig_verify in [false, true] {
+                let simulate = |tx: &VersionedTransaction| {
+                    parse_success_result::<RpcResponse<RpcSimulateTransactionResult>>(rpc.handle_request_sync(create_test_request("simulateTransaction", Some(json!([
+                        BASE64_STANDARD.encode(wincode::serialize(tx).unwrap()), {"encoding": "base64", "sigVerify": sig_verify}
+                    ])))))
+                };
+                assert_eq!(simulate(&valid).value.err, None);
+                assert!(simulate(&invalid).value.err.is_some());
+            }
+            let _: String = parse_success_result(send(&rpc, &valid, false));
+            assert_eq!(rpc.working_bank().get_balance(&recipient), 1_000_000_000);
+        }
+
+        #[test]
+        fn pq_rpc_accepts_sixteen_signers_and_bounds_wire_decoding() {
+            let (rpc, receiver, authorities, config, recipient) = start_pq(15, 1);
+            let tx = signed(&rpc, &authorities, &config, &recipient);
+            assert_eq!(tx.signatures.len(), 16);
+            let bytes = wincode::serialize(&tx).unwrap();
+            assert!(bytes.len() > PACKET_DATA_SIZE && bytes.len() <= MAX_TRANSACTION_BYTES);
+            let _: String = parse_success_result(send(&rpc, &tx, true));
+            assert_eq!(receiver.recv().unwrap(), bytes);
+            for encoding in [
+                TransactionBinaryEncoding::Base58,
+                TransactionBinaryEncoding::Base64,
+            ] {
+                let encode = |bytes: &[u8]| match encoding {
+                    TransactionBinaryEncoding::Base58 => bs58::encode(bytes).into_string(),
+                    TransactionBinaryEncoding::Base64 => BASE64_STANDARD.encode(bytes),
+                };
+                assert_eq!(
+                    decode_rpc_transaction(encode(&bytes), encoding, true)
+                        .unwrap()
+                        .0,
+                    bytes
+                );
+                assert!(
+                    decode_rpc_transaction(
+                        encode(&vec![0; MAX_TRANSACTION_BYTES + 1]),
+                        encoding,
+                        true
+                    )
+                    .is_err()
+                );
+            }
+            let mut oversized = signed(&rpc, &authorities, &config, &recipient);
+            if let VersionedMessage::Legacy(message) = &mut oversized.message {
+                message.instructions[1]
+                    .data
+                    .resize(MAX_TRANSACTION_BYTES, 0);
+            }
+            parse_failure_response(send(&rpc, &oversized, true));
+            assert!(receiver.is_empty());
+        }
     }
 
     #[test]

@@ -19,12 +19,21 @@ rustdoc-args = ["--cfg=docsrs"]
 agave-unstable-api = []
 
 [dependencies]
+agave-pq-crypto = { path = "../pq-crypto" }
+crossbeam-channel = { workspace = true }
+# ml-kem 0.2.1's prerelease constraint also resolves to incompatible kem 0.3.0.
+kem = "=0.3.0-pre.0"
+ml-kem = { version = "=0.2.1", features = ["zeroize"] }
 quinn = { workspace = true }
+rand08 = { package = "rand", version = "0.8.6" }
 rustls = { workspace = true, features = ["ring"] }
 rustls-webpki = { workspace = true }
 solana-keypair = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-signer = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "io-util"] }
+zeroize = "1.8.2"
 
 [lints]
 workspace = true

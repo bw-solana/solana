@@ -22,3 +22,6 @@ pub use skip_client_verification::SkipClientVerification;
 
 pub mod notify_key_update;
 pub use notify_key_update::NotifyKeyUpdate;
+
+/// Explicit, pinned post-quantum TLS/QUIC profile for the experimental validator.
+pub mod pq;

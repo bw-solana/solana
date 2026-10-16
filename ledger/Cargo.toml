@@ -29,6 +29,8 @@ stable-abi = [
 agave-unstable-api = []
 
 [dependencies]
+agave-pq-crypto = { workspace = true }
+sha2 = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-reserved-account-keys = { workspace = true }
 agave-snapshots = { workspace = true }

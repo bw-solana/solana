@@ -16,6 +16,7 @@ use {
             tower_storage::{NullTowerStorage, TowerStorage},
             verify_blockstore_root_with_vote_history,
         },
+        experimental_pq::{ExperimentalPqConfig, ExperimentalPqService},
         forwarding_stage::ForwardingClientConfig,
         repair::{
             self, repair_handler::RepairHandlerType, serve_repair_service::ServeRepairService,
@@ -335,6 +336,9 @@ pub struct ValidatorConfig {
     pub voting_disabled: bool,
     pub account_paths: Vec<PathBuf>,
     pub rpc_config: JsonRpcConfig,
+    /// Opt-in PQ consensus, data plane and SVM authentication; no classical
+    /// authority services are started when configured.
+    pub experimental_pq: Option<ExperimentalPqConfig>,
     /// Specifies which plugins to start up with
     pub on_start_geyser_plugin_config_files: Option<Vec<PathBuf>>,
     pub geyser_plugin_always_enabled: bool,
@@ -425,6 +429,7 @@ impl ValidatorConfig {
             blockstore_options: BlockstoreOptions::default_for_tests(),
             account_paths: Vec::new(),
             rpc_config: JsonRpcConfig::default_for_test(),
+            experimental_pq: None,
             on_start_geyser_plugin_config_files: None,
             geyser_plugin_always_enabled: false,
             rpc_addrs: None,
@@ -705,15 +710,16 @@ pub struct Validator {
     system_monitor_service: Option<SystemMonitorService>,
     sample_performance_service: Option<SamplePerformanceService>,
     stats_reporter_service: StatsReporterService,
-    gossip_service: GossipService,
-    serve_repair_service: ServeRepairService,
+    gossip_service: Option<GossipService>,
+    serve_repair_service: Option<ServeRepairService>,
     completed_data_sets_service: Option<CompletedDataSetsService>,
     snapshot_packager_service: SnapshotPackagerService,
     poh_recorder: Arc<RwLock<PohRecorder>>,
-    poh_service: PohService,
-    block_creation_loop: BlockCreationLoop,
-    tpu: Tpu,
-    tvu: Tvu,
+    poh_service: Option<PohService>,
+    block_creation_loop: Option<BlockCreationLoop>,
+    tpu: Option<Tpu>,
+    tvu: Option<Tvu>,
+    experimental_pq_service: Option<ExperimentalPqService>,
     ip_echo_server: Option<solana_net_utils::IpEchoServer>,
     pub cluster_info: Arc<ClusterInfo>,
     pub bank_forks: Arc<RwLock<BankForks>>,
@@ -878,6 +884,20 @@ impl Validator {
             ));
         }
         let genesis_config = load_genesis(config, ledger_path)?;
+        if let Some(pq) = &config.experimental_pq {
+            pq.validate()
+                .map_err(|e| ValidatorError::Other(e.to_string()))?;
+            if pq.genesis_hash != genesis_config.hash().to_string()
+                || pq.local_id != identity_keypair.pubkey().to_string()
+            {
+                return Err(anyhow!(
+                    "PQ configuration does not match the pinned genesis and local identity"
+                ));
+            }
+            if config.warp_slot.is_some() {
+                return Err(anyhow!("PQ mode does not permit warping"));
+            }
+        }
         metrics_config_sanity_check(genesis_config.cluster_type)?;
 
         info!("Validating accounts paths...");
@@ -1214,7 +1234,7 @@ impl Validator {
         )
         .map_err(ValidatorError::Other)?;
 
-        if config.process_ledger_before_services {
+        if config.process_ledger_before_services && config.experimental_pq.is_none() {
             process_blockstore
                 .process()
                 .map_err(ValidatorError::Other)?;
@@ -1232,6 +1252,33 @@ impl Validator {
 
         let optimistically_confirmed_bank =
             OptimisticallyConfirmedBank::locked_from_bank_forks_root(&bank_forks);
+        let experimental_pq_service = if let Some(pq) = &config.experimental_pq {
+            let bank = bank_forks.read().unwrap().root_bank();
+            bank.freeze();
+            Some(
+                ExperimentalPqService::spawn(
+                    pq.clone(),
+                    bank_forks.clone(),
+                    blockstore.clone(),
+                    exit.clone(),
+                    block_commitment_cache.clone(),
+                    optimistically_confirmed_bank.clone(),
+                )
+                .map_err(|e| ValidatorError::Other(format!("PQ startup: {e:#}")))?,
+            )
+        } else {
+            None
+        };
+        let mut rpc_config = config.rpc_config.clone();
+        if let Some(service) = &experimental_pq_service {
+            // Classical gossip/shred-height health is inactive in PQ mode.
+            // Readiness and finalized state are exposed by the native status RPC.
+            rpc_config.skip_preflight_health_check = true;
+            rpc_config.experimental_pq = Some(Arc::new(solana_rpc::rpc::PqRpcIngress {
+                sender: service.transaction_sender.clone(),
+                status: service.status.clone(),
+            }));
+        }
         // Updated by Votor and shared with RPC health and block creation.
         let highest_finalized = Arc::new(RwLock::new(None));
 
@@ -1322,7 +1369,7 @@ impl Validator {
             };
             let rpc_svc_config = JsonRpcServiceConfig {
                 rpc_addr,
-                rpc_config: config.rpc_config.clone(),
+                rpc_config: rpc_config.clone(),
                 snapshot_config: Some(snapshot_controller.snapshot_config().clone()),
                 bank_forks: bank_forks.clone(),
                 block_commitment_cache: block_commitment_cache.clone(),
@@ -1471,6 +1518,47 @@ impl Validator {
 
         let stats_reporter_service =
             StatsReporterService::new(stats_reporter_receiver, exit.clone());
+        let blockstore_metric_report_service =
+            BlockstoreMetricReportService::new(blockstore.clone(), exit.clone());
+
+        if experimental_pq_service.is_some() {
+            *start_progress.write().unwrap() = ValidatorStartProgress::Running;
+            info!("PQ validator running with native SVM, AccountsDB, Blockstore and RPC");
+            return Ok(Self {
+                log_config: config.log_config.clone(),
+                exit,
+                validator_exit: config.validator_exit.clone(),
+                json_rpc_service,
+                pubsub_service,
+                rpc_completed_slots_service,
+                optimistically_confirmed_bank_tracker,
+                transaction_status_service,
+                entry_notifier_service,
+                system_monitor_service,
+                sample_performance_service,
+                stats_reporter_service,
+                gossip_service: None,
+                serve_repair_service: None,
+                completed_data_sets_service,
+                snapshot_packager_service,
+                poh_recorder,
+                poh_service: None,
+                block_creation_loop: None,
+                tpu: None,
+                tvu: None,
+                experimental_pq_service,
+                ip_echo_server,
+                cluster_info,
+                bank_forks,
+                blockstore,
+                geyser_plugin_service,
+                _contact_info_notifier: contact_info_notifier,
+                blockstore_metric_report_service,
+                accounts_background_service,
+                xdp_transmitter: None,
+                _tpu_client_next_runtime: tpu_client_next_runtime,
+            });
+        }
 
         let epoch_specs: Box<dyn solana_gossip::epoch_specs::EpochSpecs> =
             Box::new(crate::epoch_specs::EpochSpecs::from(bank_forks.clone()));
@@ -1587,9 +1675,6 @@ impl Validator {
             rpc_override_health_check,
             &start_progress,
         )?;
-
-        let blockstore_metric_report_service =
-            BlockstoreMetricReportService::new(blockstore.clone(), exit.clone());
 
         let wait_for_vote_to_start_leader =
             !waited_for_supermajority && !config.no_wait_for_vote_to_start_leader;
@@ -1899,8 +1984,8 @@ impl Validator {
             log_config: config.log_config.clone(),
             exit,
             stats_reporter_service,
-            gossip_service,
-            serve_repair_service,
+            gossip_service: Some(gossip_service),
+            serve_repair_service: Some(serve_repair_service),
             json_rpc_service,
             pubsub_service,
             rpc_completed_slots_service,
@@ -1911,10 +1996,11 @@ impl Validator {
             sample_performance_service,
             snapshot_packager_service,
             completed_data_sets_service,
-            tpu,
-            tvu,
-            poh_service,
-            block_creation_loop,
+            tpu: Some(tpu),
+            tvu: Some(tvu),
+            poh_service: Some(poh_service),
+            block_creation_loop: Some(block_creation_loop),
+            experimental_pq_service: None,
             poh_recorder,
             ip_echo_server,
             validator_exit: config.validator_exit.clone(),
@@ -2020,10 +2106,18 @@ impl Validator {
         drop(self.bank_forks);
         drop(self.cluster_info);
 
-        self.poh_service.join().expect("poh_service");
-        self.block_creation_loop
-            .join()
-            .expect("block_creation_loop");
+        if let Some(service) = self.experimental_pq_service {
+            service
+                .join()
+                .expect("PQ validator thread")
+                .expect("PQ validator service");
+        }
+        if let Some(service) = self.poh_service {
+            service.join().expect("poh_service");
+        }
+        if let Some(service) = self.block_creation_loop {
+            service.join().expect("block_creation_loop");
+        }
         drop(self.poh_recorder);
 
         if let Some(json_rpc_service) = self.json_rpc_service {
@@ -2076,10 +2170,12 @@ impl Validator {
             .join()
             .expect("snapshot_packager_service");
 
-        self.gossip_service.join().expect("gossip_service");
-        self.serve_repair_service
-            .join()
-            .expect("serve_repair_service");
+        if let Some(service) = self.gossip_service {
+            service.join().expect("gossip_service");
+        }
+        if let Some(service) = self.serve_repair_service {
+            service.join().expect("serve_repair_service");
+        }
         self.stats_reporter_service
             .join()
             .expect("stats_reporter_service");
@@ -2092,8 +2188,12 @@ impl Validator {
         if let Some(xdp_transmitter) = self.xdp_transmitter {
             xdp_transmitter.join().expect("xdp_transmitter");
         }
-        self.tpu.join().expect("tpu");
-        self.tvu.join().expect("tvu");
+        if let Some(service) = self.tpu {
+            service.join().expect("tpu");
+        }
+        if let Some(service) = self.tvu {
+            service.join().expect("tvu");
+        }
         if let Some(completed_data_sets_service) = self.completed_data_sets_service {
             completed_data_sets_service
                 .join()
@@ -2459,6 +2559,12 @@ fn load_blockstore(
         let load_snapshot_handle = thread::Builder::new()
             .name("solBnkFrkSnap".into())
             .spawn_scoped(scope, || {
+                // PQ recovery authenticates its complete native journal from
+                // the pinned genesis. Classical snapshot hashes cannot stand
+                // in for the required PQ checkpoint certificate.
+                if config.experimental_pq.is_some() {
+                    return Ok(None);
+                }
                 bank_forks_utils::try_load_bank_forks_from_snapshot(
                     genesis_config,
                     &config.account_paths,
@@ -2509,6 +2615,22 @@ fn load_blockstore(
                 &config.snapshot_config.bank_snapshots_dir,
                 &config.account_paths,
             );
+            if config.experimental_pq.is_some() {
+                let bank = Bank::new_from_genesis(
+                    genesis_config,
+                    Arc::new(process_options.runtime_config.clone()),
+                    config.account_paths.clone(),
+                    process_options.debug_keys.clone(),
+                    process_options.accounts_db_config.clone(),
+                    accounts_update_notifier,
+                    None,
+                    exit.clone(),
+                    None,
+                    None,
+                );
+                bank.freeze();
+                return Ok((BankForks::new_rw_arc(bank), None));
+            }
             bank_forks_utils::load_bank_forks_from_genesis(
                 genesis_config,
                 &blockstore,

@@ -1,0 +1,68 @@
+{
+  "format": "Main30-final-workspace-integration-v1",
+  "applied": true,
+  "all79_match_tested_source": true,
+  "changed_files": [
+    "core/src/experimental_pq.rs",
+    "core/src/experimental_pq_pipeline.rs",
+    "ledger/src/blockstore.rs",
+    "ledger/src/blockstore/tests.rs",
+    "pq-crypto/src/consensus.rs",
+    "pq-crypto/src/crypto.rs",
+    "pq-crypto/src/network.rs",
+    "pq-crypto/src/quantumglow.rs"
+  ],
+  "source_manifest_sha384": "d9067798839cbe789909b3832b678fc782db09d4f198274fec666610b57ebe478aad5b87ccd84136540df4442565f907",
+  "benchmark_validator_sha384": "fe2c0f4134319e8a7c9e3c3a39addacd67140594a6744b5c1c2bf76015d1477a427259ae73e73d3dbea7eb72efca9b32",
+  "prior_unique_functional_tests_on_identical_source": 216,
+  "post_integration_checks": [
+    {
+      "label": "format-nightly",
+      "returncode": 0,
+      "seconds": 2.6785628497600555,
+      "command": [
+        "cargo",
+        "+nightly",
+        "fmt",
+        "-p",
+        "solana-core",
+        "-p",
+        "solana-ledger",
+        "-p",
+        "agave-pq-crypto",
+        "--",
+        "--check"
+      ],
+      "log_sha384": "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
+      "functional_tests_rerun": false
+    },
+    {
+      "label": "strict-clippy",
+      "returncode": 0,
+      "seconds": 28.26173423230648,
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "-p",
+        "solana-core",
+        "-p",
+        "solana-ledger",
+        "-p",
+        "agave-pq-crypto",
+        "--features",
+        "solana-core/agave-unstable-api,solana-ledger/agave-unstable-api",
+        "--lib",
+        "--tests",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "log_sha384": "683e4ba4dfbc5626ffef24ae5de9ee3b00b31356874e68824a7afd193ee273a426dec5618f7175478a87dacb89e5cc05",
+      "functional_tests_rerun": false
+    }
+  ],
+  "source_integration_receipt_sha384": "2b0a81e02bea5de3d7f86647e54547c512b3d3e5e25cf7e990d476a9c0b8e08fec2254f4e811ac0e392d69d0dda7602c",
+  "source_integration_plan_sha384": "5f2578bd73241f2d9fe77e7f3f5d9ec5ec9c9a74d28f1c9dd8c235c4d4d39ee0cdafb60bc98e33cf22558fc203a26782",
+  "qualification": "Final workspace identity and post-copy formatting/lint; runtime acceptance is reported separately."
+}

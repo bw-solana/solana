@@ -31,6 +31,7 @@ impl FromClapArgMatches for JsonRpcConfig {
         };
 
         Ok(JsonRpcConfig {
+            experimental_pq: None,
             enable_rpc_transaction_history: matches.is_present("enable_rpc_transaction_history"),
             enable_extended_tx_metadata_storage: matches
                 .is_present("enable_extended_tx_metadata_storage"),

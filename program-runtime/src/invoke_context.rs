@@ -633,6 +633,13 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         timings: &mut ExecuteTimings,
     ) -> Result<(), InstructionError> {
         let instruction_context = self.transaction_context.get_current_instruction_context()?;
+        let program = instruction_context.get_program_key()?;
+        if self.is_classical_authentication_disabled()
+            && (program == &solana_sdk_ids::zk_token_proof_program::id()
+                || program == &solana_sdk_ids::zk_elgamal_proof_program::id())
+        {
+            return Err(InstructionError::UnsupportedProgramId);
+        }
         let process_executable_chain_time = Measure::start("process_executable_chain_time");
 
         let builtin_id = {
@@ -803,6 +810,12 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         self.environment_config
             .epoch_stake_callback
             .is_precompile(pubkey)
+    }
+
+    pub fn is_classical_authentication_disabled(&self) -> bool {
+        self.environment_config
+            .epoch_stake_callback
+            .is_classical_authentication_disabled()
     }
 
     // Should alignment be enforced during user pointer translation

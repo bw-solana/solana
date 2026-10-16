@@ -1,0 +1,30 @@
+{
+  "format": "main30-validation-public-artifact-manifest-v1",
+  "created_unix_ms": 1792098169114,
+  "public_export_performed": true,
+  "source_staging_manifest_sha384": "a321ba343a9a01eea437f3c988edd9559b9c175bbd824e0de48808552edbc2064a857147d9f93f008ece9d2fd9cc3ca0",
+  "source_manifest_sha384": "d9067798839cbe789909b3832b678fc782db09d4f198274fec666610b57ebe478aad5b87ccd84136540df4442565f907",
+  "artifacts_sha384": {
+    "README.md": "7a3c85b9d43202596ae559e5290c272893dde44115c748316951cd3a4addc150c436b51c64530eb0efb3f4ea0f5a2ac1",
+    "summary.json": "e3619761fb372b76ced3742fc3484e9e6293a17f6f5095b95e41e9ee3082127246dabe7ff46f4fb5a3497eb70cd356a0",
+    "workspace-integration.json": "352834c703b59a015885f9000be945f1f779282bdd15e86a7b230205cf32a081b0acd45abe06d02d76355d0e41b254f5"
+  },
+  "public_input_provenance_sha384": {
+    "build_manifest": "6934f1d038ffb82ff9363b3fc5997e003a5bd3ac1ebc7ed5643af341ddce40ae4efc3c6dc1281522ec97ced529114d09",
+    "completed_validation": "518e636c236344f68234352318c9f0e1ce9bf140a17a618ce2ea3c5737e4d43b405587ccccc60d343f43473343889337",
+    "distinct_census": "86ab0818790702debfa44c5bd1928beafcf9ebb4cfd193c787270d144e7f0857b341bc232fd83d768aa1a1bf719ec404",
+    "independent_final_build_review": "8ac83efe9c7bc14310fb858bc124eb065a9fe976bb5f6b86039deb36f7b0ada7b73af30d67ee1fd99c89a0e2000472c3",
+    "actual_R_genesis_provenance": "0db1d136cd813fc1eae17ed618a1bd5d37232b3a0542ad7512faacdc2dc7418ac65521296cb758a8c783a40fdda12053"
+  },
+  "scope": "Source validation and final workspace integration checks; cluster outcomes are reported separately.",
+  "documentation_refinement": {
+    "prior_artifact_manifest_sha384": "ace707f77ad50ae17941fa2ad3171aac660c064313343e5c9ed1c2f51c8204175e26ff767dd4b10e4bd78541b9d46556",
+    "prior_README_sha384": "c2e30dc6bd6a082168e0ee4dbbeca565c2c0dbdc5f19c3410b00700411b052835d9976f3d5849698b2f4bc50659d0017",
+    "scope": "Clarify existing positive math cache, actual accepted PQ/ordinary runtime evidence and their differing scopes; source-validation numbers and summary unchanged."
+  },
+  "workspace_integration_addendum": {
+    "prior_artifact_manifest_sha384": "e3575e33e22a242ff6a85801315ddfa80c1cabc1fa3397953f0672d3d2d86424512ba0b33625a3c6113f8d5435cd0fc1",
+    "source_manifest_unchanged": true,
+    "prior_functional_test_count_unchanged": true
+  }
+}

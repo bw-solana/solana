@@ -20,6 +20,8 @@ pub mod consensus;
 pub mod cost_update_service;
 pub mod drop_bank_service;
 pub mod epoch_specs;
+pub mod experimental_pq;
+mod experimental_pq_execution;
 pub mod fetch_stage;
 pub mod forwarding_stage;
 pub mod gen_keys;

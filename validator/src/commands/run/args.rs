@@ -145,6 +145,16 @@ impl FromClapArgMatches for RunArgs {
 
 pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 'a> {
     app.arg(
+        Arg::with_name("experimental_pq_config")
+            .long("experimental-pq-config")
+            .value_name("JSON")
+            .takes_value(true)
+            .help(
+                "Run the experimental PQ validator with a pinned genesis and native SVM \
+                 authentication",
+            ),
+    )
+    .arg(
         Arg::with_name(SKIP_SEED_PHRASE_VALIDATION_ARG.name)
             .long(SKIP_SEED_PHRASE_VALIDATION_ARG.long)
             .help(SKIP_SEED_PHRASE_VALIDATION_ARG.help),

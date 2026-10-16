@@ -37,6 +37,1942 @@ use {
     test_case::{test_case, test_matrix},
 };
 
+fn streaming_proposal_intent(slot: Slot, payload: Vec<u8>) -> ExperimentalPqProposalIntent {
+    let chain = [0x42; 32];
+    let parent = [0x63; 48];
+    let candidate = agave_pq_crypto::crypto::hash_commitment(
+        b"agave-pq-candidate-v1",
+        &[&chain, &slot.to_le_bytes(), &parent, &payload],
+    );
+    ExperimentalPqProposalIntent {
+        chain,
+        epoch: 7,
+        slot,
+        parent,
+        candidate,
+        payload,
+    }
+}
+
+#[test]
+fn test_experimental_pq_local_witness_atomic_publication_survives_reopen() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let commitment = [0x37; 48];
+    let witness = vec![0x72; 8193];
+    let intent = streaming_proposal_intent(17, vec![0x45; 7001]);
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        store.put_experimental_pq_proposal_intent(&intent).unwrap();
+        for _ in 0..2 {
+            store
+                .put_experimental_pq_local_block(17, commitment, &witness)
+                .unwrap();
+        }
+    }
+    let store = Blockstore::open(directory.path()).unwrap();
+    for key in [[0; 48], commitment] {
+        assert_eq!(
+            store.get_experimental_pq_block(17, key).unwrap(),
+            Some(witness.clone())
+        );
+    }
+    assert_eq!(
+        store.get_experimental_pq_proposal_intent(17).unwrap(),
+        Some(intent)
+    );
+    assert!(!store.is_root(17));
+    assert_eq!(store.experimental_pq_journal_usage().unwrap(), None);
+}
+
+#[test]
+fn test_experimental_pq_local_witness_repairs_partial_legacy_rows_without_overwrite() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let store = Blockstore::open(directory.path()).unwrap();
+    let commitment = [0x51; 48];
+    for (slot, first) in [(11, [0; 48]), (12, commitment)] {
+        store
+            .put_experimental_pq_block(slot, first, b"fixed")
+            .unwrap();
+        store
+            .put_experimental_pq_local_block(slot, commitment, b"fixed")
+            .unwrap();
+        for key in [[0; 48], commitment] {
+            assert_eq!(
+                store
+                    .get_experimental_pq_block(slot, key)
+                    .unwrap()
+                    .as_deref(),
+                Some(b"fixed".as_slice())
+            );
+        }
+    }
+    // A conflict in either old key must not create the missing sibling key.
+    for (slot, fixed, absent) in [(13, [0; 48], commitment), (14, commitment, [0; 48])] {
+        store
+            .put_experimental_pq_block(slot, fixed, b"old")
+            .unwrap();
+        assert!(
+            store
+                .put_experimental_pq_local_block(slot, commitment, b"new")
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .get_experimental_pq_block(slot, fixed)
+                .unwrap()
+                .as_deref(),
+            Some(b"old".as_slice())
+        );
+        assert_eq!(store.get_experimental_pq_block(slot, absent).unwrap(), None);
+    }
+    for (slot, hash, body) in [
+        (0, commitment, b"x".as_slice()),
+        (15, [0; 48], b"x"),
+        (16, commitment, b""),
+    ] {
+        assert!(
+            store
+                .put_experimental_pq_local_block(slot, hash, body)
+                .is_err()
+        );
+        assert_eq!(
+            store.get_experimental_pq_block(slot, commitment).unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
+fn test_experimental_pq_local_witness_race_fixes_one_complete_candidate() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let store = Arc::new(Blockstore::open(directory.path()).unwrap());
+    let barrier = std::sync::Barrier::new(2);
+    let candidates = [
+        ([0x81; 48], b"first".as_slice()),
+        ([0x82; 48], b"second".as_slice()),
+    ];
+    let succeeded = std::thread::scope(|scope| {
+        let tasks = candidates
+            .iter()
+            .map(|(hash, body)| {
+                let store = &store;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    store
+                        .put_experimental_pq_local_block(19, *hash, body)
+                        .is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        tasks
+            .into_iter()
+            .map(|task| task.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(succeeded.iter().filter(|success| **success).count(), 1);
+    for (index, (hash, body)) in candidates.iter().enumerate() {
+        assert_eq!(
+            store
+                .get_experimental_pq_block(19, *hash)
+                .unwrap()
+                .as_deref(),
+            succeeded[index].then_some(*body)
+        );
+    }
+    let winner = usize::from(!succeeded[0]);
+    assert_eq!(
+        store
+            .get_experimental_pq_block(19, [0; 48])
+            .unwrap()
+            .as_deref(),
+        Some(candidates[winner].1)
+    );
+    assert!(!store.is_root(19));
+    // The legacy slot fence must still prevent a new streaming intent.
+    assert!(
+        store
+            .put_experimental_pq_proposal_intent(&streaming_proposal_intent(19, vec![7]))
+            .is_err()
+    );
+}
+
+#[test]
+fn test_experimental_pq_streaming_intent_survives_partial_publication_and_reopen() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let intent = streaming_proposal_intent(17, vec![0x75; 7001]);
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        store.put_experimental_pq_proposal_intent(&intent).unwrap();
+        store.put_experimental_pq_proposal_intent(&intent).unwrap();
+        assert_eq!(
+            store.get_experimental_pq_proposal_intent(17).unwrap(),
+            Some(intent.clone())
+        );
+        assert_eq!(store.get_experimental_pq_block(17, [0; 48]).unwrap(), None);
+        assert!(!store.is_root(17));
+        assert_eq!(store.experimental_pq_journal_usage().unwrap(), None);
+        assert_eq!(
+            store
+                .visit_experimental_pq_block_index(0, Slot::MAX, 1, |_, _| {
+                    panic!("unsigned streaming intent must not be a witness lookup key")
+                })
+                .unwrap(),
+            0
+        );
+    }
+    let store = Blockstore::open(directory.path()).unwrap();
+    assert_eq!(
+        store.get_experimental_pq_proposal_intent(17).unwrap(),
+        Some(intent.clone())
+    );
+    let replacement = streaming_proposal_intent(17, vec![0x76; 7001]);
+    assert!(
+        store
+            .put_experimental_pq_proposal_intent(&replacement)
+            .is_err()
+    );
+    let mut wrong_epoch = intent.clone();
+    wrong_epoch.epoch += 1;
+    assert!(
+        store
+            .put_experimental_pq_proposal_intent(&wrong_epoch)
+            .is_err()
+    );
+    store
+        .put_experimental_pq_block(17, [0; 48], b"complete witness now persisted")
+        .unwrap();
+    store.put_experimental_pq_proposal_intent(&intent).unwrap();
+    store
+        .put_experimental_pq_block(18, [0; 48], b"legacy complete proposal")
+        .unwrap();
+    assert!(
+        store
+            .put_experimental_pq_proposal_intent(&streaming_proposal_intent(18, vec![1]))
+            .is_err()
+    );
+}
+
+#[test]
+fn test_experimental_pq_streaming_intent_detects_corruption_without_replacement() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let store = Blockstore::open(directory.path()).unwrap();
+    let intent = streaming_proposal_intent(9, vec![0x68; 101]);
+    store.put_experimental_pq_proposal_intent(&intent).unwrap();
+    let key = (0, ExperimentalPqProposalIntent::key(9));
+    let original = store.experimental_pq_cf.get_bytes(key).unwrap().unwrap();
+    for index in [0, 8, 40, 48, 56, 104, 152, 160, original.len() - 1] {
+        let mut changed = original.clone();
+        changed[index] ^= 1;
+        store.experimental_pq_cf.put_bytes(key, &changed).unwrap();
+        assert!(store.get_experimental_pq_proposal_intent(9).is_err());
+        assert!(store.put_experimental_pq_proposal_intent(&intent).is_err());
+        assert_eq!(
+            store.experimental_pq_cf.get_bytes(key).unwrap().unwrap(),
+            changed
+        );
+    }
+    for changed in [
+        original[..original.len() - 1].to_vec(),
+        [original.clone(), vec![0]].concat(),
+    ] {
+        store.experimental_pq_cf.put_bytes(key, &changed).unwrap();
+        assert!(store.get_experimental_pq_proposal_intent(9).is_err());
+    }
+    store.experimental_pq_cf.put_bytes(key, &original).unwrap();
+    assert_eq!(
+        store.get_experimental_pq_proposal_intent(9).unwrap(),
+        Some(intent)
+    );
+    assert!(
+        store
+            .put_experimental_pq_proposal_intent(&streaming_proposal_intent(0, vec![1]))
+            .is_err()
+    );
+    assert!(
+        store
+            .put_experimental_pq_proposal_intent(&streaming_proposal_intent(10, Vec::new()))
+            .is_err()
+    );
+    assert!(
+        store
+            .put_experimental_pq_proposal_intent(&streaming_proposal_intent(
+                10,
+                vec![1; MAX_PQ_PROPOSAL_PAYLOAD_BYTES + 1]
+            ))
+            .is_err()
+    );
+}
+
+#[test]
+fn test_experimental_pq_streaming_intent_race_fixes_exactly_one_candidate() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let store = Arc::new(Blockstore::open(directory.path()).unwrap());
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let alternatives = [
+        streaming_proposal_intent(12, vec![1; 100]),
+        streaming_proposal_intent(12, vec![2; 100]),
+    ];
+    let results = std::thread::scope(|scope| {
+        let tasks = alternatives
+            .iter()
+            .map(|intent| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    store.put_experimental_pq_proposal_intent(intent).is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        tasks
+            .into_iter()
+            .map(|task| task.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(results.iter().filter(|success| **success).count(), 1);
+    let fixed = store
+        .get_experimental_pq_proposal_intent(12)
+        .unwrap()
+        .unwrap();
+    assert_eq!(fixed, alternatives[usize::from(!results[0])]);
+}
+
+#[test]
+fn test_experimental_pq_streaming_intent_namespace_preserves_journal_replay() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let intent = streaming_proposal_intent(300, vec![0x79; 1001]);
+    let mut header = [0u8; 53];
+    header[0] = 1;
+    header[1..49].fill(0x81);
+    let ticks = [100u64, 200].map(|time| [vec![0], time.to_le_bytes().to_vec()].concat());
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        header[49..53].copy_from_slice(&1u32.to_le_bytes());
+        store
+            .append_experimental_pq_checkpoint(&header, 0, &ticks[0], &[])
+            .unwrap();
+        store.put_experimental_pq_proposal_intent(&intent).unwrap();
+        header[49..53].copy_from_slice(&2u32.to_le_bytes());
+        store
+            .append_experimental_pq_checkpoint(&header, 1, &ticks[1], &[])
+            .unwrap();
+    }
+    let store = Blockstore::open(directory.path()).unwrap();
+    let mut replayed = Vec::new();
+    assert_eq!(
+        store
+            .visit_experimental_pq_journal(|seen, bytes| {
+                assert_eq!(*seen, header);
+                replayed.extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap(),
+        Some(header)
+    );
+    assert_eq!(replayed, ticks.concat());
+    assert_eq!(
+        store.get_experimental_pq_proposal_intent(300).unwrap(),
+        Some(intent)
+    );
+    assert!(!store.is_root(300));
+}
+
+#[test]
+fn test_experimental_pq_key_only_witness_index_bounds_and_reopen() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let first = [0x61; 48];
+    let mut alias = first;
+    alias[47] ^= 1;
+    let second = [0x72; 48];
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        // Invalid bodies are intentional: indexing must not decode them or
+        // mistake even a real stored row for authenticated consensus metadata.
+        store
+            .put_experimental_pq_block(7, first, &vec![0x80; 2 * 1024 * 1024])
+            .unwrap();
+        store
+            .put_experimental_pq_block(7, alias, b"crash-orphan witness, no journal")
+            .unwrap();
+        store
+            .put_experimental_pq_block(11, second, b"later unrooted witness")
+            .unwrap();
+        assert!(!store.is_root(7));
+        assert!(!store.is_root(11));
+        for index in [(0, [0; 48]), (0, first), (7, [0; 48]), (7, [0xff; 48])] {
+            store
+                .experimental_pq_cf
+                .put_bytes(index, b"reserved metadata must not be indexed")
+                .unwrap();
+        }
+        let mut keys = Vec::new();
+        assert_eq!(
+            store
+                .visit_experimental_pq_block_index(0, Slot::MAX, 3, |slot, commitment| {
+                    keys.push((slot, commitment));
+                    Ok(())
+                })
+                .unwrap(),
+            3
+        );
+        assert_eq!(keys, [(7, alias), (7, first), (11, second)]);
+        let mut callbacks = 0;
+        assert_matches!(
+            store.visit_experimental_pq_block_index(0, Slot::MAX, 2, |_, _| {
+                callbacks += 1;
+                Ok(())
+            }),
+            Err(BlockstoreError::InvalidShredData(message))
+                if message == "PQ witness index record limit"
+        );
+        assert_eq!(callbacks, 2);
+        assert_matches!(
+            store.visit_experimental_pq_block_index(7, 7, 0, |_, _| {
+                panic!("record limit must reject before callback")
+            }),
+            Err(BlockstoreError::InvalidShredData(message))
+                if message == "PQ witness index record limit"
+        );
+        for (start, end) in [(0, 0), (1, 6), (8, 10), (12, Slot::MAX)] {
+            assert_eq!(
+                store
+                    .visit_experimental_pq_block_index(start, end, 0, |_, _| {
+                        panic!("empty range must have no witnesses")
+                    })
+                    .unwrap(),
+                0
+            );
+        }
+        assert_matches!(
+            store.visit_experimental_pq_block_index(11, 7, 3, |_, _| Ok(())),
+            Err(BlockstoreError::InvalidShredData(message))
+                if message == "PQ witness index slot range"
+        );
+        assert_matches!(
+            store.visit_experimental_pq_block_index(7, 7, 2, |_, _| {
+                Err(BlockstoreError::SlotNotRooted)
+            }),
+            Err(BlockstoreError::SlotNotRooted)
+        );
+        // Generic ledger cleanup does not erase signed PQ witness history.
+        *store.lowest_cleanup_slot.write().unwrap() = 10;
+        assert_eq!(
+            store
+                .visit_experimental_pq_block_index(7, 7, 2, |_, _| Ok(()))
+                .unwrap(),
+            2
+        );
+    }
+    let reopened = Blockstore::open(directory.path()).unwrap();
+    let mut keys = Vec::new();
+    assert_eq!(
+        reopened
+            .visit_experimental_pq_block_index(7, 11, 3, |slot, commitment| {
+                keys.push((slot, commitment));
+                Ok(())
+            })
+            .unwrap(),
+        3
+    );
+    assert_eq!(keys, [(7, alias), (7, first), (11, second)]);
+    assert!(
+        reopened
+            .get_experimental_pq_block(7, alias)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn test_experimental_pq_wal_reopen_and_append() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut journal = vec![0u8; 53];
+    journal[0] = 1;
+    journal[1..49].fill(7);
+    journal[49..53].copy_from_slice(&1u32.to_le_bytes());
+    journal.extend_from_slice(b"first authenticated input");
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        assert!(store.get_experimental_pq_checkpoint().unwrap().is_none());
+        store
+            .put_experimental_pq_block(1, [8; 48], b"raw authenticated block witness")
+            .unwrap();
+        store
+            .put_experimental_pq_checkpoint(&journal, &[(1, [8; 48])])
+            .unwrap();
+        assert!(store.is_root(1));
+        assert_eq!(
+            store.get_experimental_pq_checkpoint().unwrap().unwrap(),
+            journal
+        );
+        journal[49..53].copy_from_slice(&2u32.to_le_bytes());
+        journal.extend_from_slice(b"second authenticated input");
+        store.put_experimental_pq_checkpoint(&journal, &[]).unwrap();
+    }
+    let reopened = Blockstore::open(directory.path()).unwrap();
+    assert!(reopened.is_root(1));
+    assert_eq!(
+        reopened.get_experimental_pq_checkpoint().unwrap().unwrap(),
+        journal
+    );
+    assert_eq!(
+        reopened
+            .get_experimental_pq_block(1, [8; 48])
+            .unwrap()
+            .unwrap(),
+        b"raw authenticated block witness"
+    );
+}
+
+#[test]
+fn test_experimental_pq_storage_rejects_root_without_witness_and_rewrites() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let store = Blockstore::open(directory.path()).unwrap();
+    let mut journal = vec![0u8; 53];
+    journal[0] = 1;
+    journal[49..53].copy_from_slice(&1u32.to_le_bytes());
+    journal.extend_from_slice(b"input one");
+    assert!(
+        store
+            .put_experimental_pq_checkpoint(&journal, &[(1, [2; 48])])
+            .is_err()
+    );
+    assert!(store.get_experimental_pq_checkpoint().unwrap().is_none());
+    assert!(!store.is_root(1));
+    store
+        .put_experimental_pq_block(1, [2; 48], b"original")
+        .unwrap();
+    assert!(
+        store
+            .put_experimental_pq_block(1, [2; 48], b"rewritten")
+            .is_err()
+    );
+    store
+        .put_experimental_pq_checkpoint(&journal, &[(1, [2; 48])])
+        .unwrap();
+    let original = journal.clone();
+    journal[1] ^= 1;
+    assert!(store.put_experimental_pq_checkpoint(&journal, &[]).is_err());
+    journal = original.clone();
+    journal[53] ^= 1;
+    assert!(store.put_experimental_pq_checkpoint(&journal, &[]).is_err());
+    journal = original.clone();
+    journal[49..53].copy_from_slice(&0u32.to_le_bytes());
+    assert!(store.put_experimental_pq_checkpoint(&journal, &[]).is_err());
+    assert_eq!(
+        store.get_experimental_pq_checkpoint().unwrap().unwrap(),
+        original
+    );
+}
+
+#[test]
+fn test_experimental_pq_native_rpc_history_survives_reopen() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let signer = Keypair::new();
+    let recipient = Pubkey::new_unique();
+    let previous = Hash::new_unique();
+    let blockhash = Hash::new_unique();
+    let transaction = VersionedTransaction::from(Transaction::new_signed_with_payer(
+        &[solana_system_interface::instruction::transfer(
+            &signer.pubkey(),
+            &recipient,
+            5,
+        )],
+        Some(&signer.pubkey()),
+        &[&signer],
+        previous,
+    ));
+    let signature = transaction.signatures[0];
+    let status = TransactionStatusMeta {
+        fee: 5000,
+        pre_balances: vec![20_000, 10_000],
+        post_balances: vec![14_995, 10_005],
+        compute_units_consumed: Some(150),
+        pre_token_balances: Some(vec![]),
+        post_token_balances: Some(vec![]),
+        rewards: Some(vec![]),
+        ..TransactionStatusMeta::default()
+    };
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        let mut journal = vec![0u8; 53];
+        journal[0] = 1;
+        store
+            .put_experimental_pq_block(1, [8; 48], b"authenticated PQ block witness")
+            .unwrap();
+        store
+            .put_experimental_pq_checkpoint(&journal, &[(1, [8; 48])])
+            .unwrap();
+        store
+            .put_experimental_pq_rpc_block(
+                1,
+                [8; 48],
+                0,
+                previous,
+                blockhash,
+                1,
+                123456,
+                &[(
+                    transaction.clone(),
+                    status.clone(),
+                    vec![(signer.pubkey(), true), (recipient, true)],
+                )],
+            )
+            .unwrap();
+        assert_eq!(store.get_first_available_block().unwrap(), 1);
+        assert_eq!(
+            store
+                .get_rooted_transaction_status(signature)
+                .unwrap()
+                .unwrap(),
+            (1, status.clone())
+        );
+        // Advancing the root must not hide earlier history just because PQ
+        // blocks do not populate classical shred counters.
+        store
+            .put_experimental_pq_block(3, [9; 48], b"later authenticated PQ witness")
+            .unwrap();
+        store
+            .put_experimental_pq_checkpoint(&journal, &[(3, [9; 48])])
+            .unwrap();
+        store
+            .put_experimental_pq_rpc_block(
+                3,
+                [9; 48],
+                1,
+                blockhash,
+                Hash::new_unique(),
+                2,
+                123458,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(store.max_root(), 3);
+        assert_eq!(store.get_first_available_block().unwrap(), 1);
+        assert_eq!(
+            store
+                .get_rooted_transaction(signature)
+                .unwrap()
+                .unwrap()
+                .slot,
+            1
+        );
+    }
+    let reopened = Blockstore::open(directory.path()).unwrap();
+    assert_eq!(reopened.max_root(), 3);
+    assert_eq!(reopened.get_first_available_block().unwrap(), 1);
+    let block = reopened.get_rooted_block(1, true).unwrap();
+    assert_eq!(block.blockhash, blockhash.to_string());
+    assert_eq!(block.previous_blockhash, previous.to_string());
+    assert_eq!(block.transactions.len(), 1);
+    assert_eq!(block.transactions[0].transaction, transaction);
+    assert_eq!(block.transactions[0].meta, status);
+    let stored = reopened.get_rooted_transaction(signature).unwrap().unwrap();
+    assert_eq!(stored.index, 0);
+    assert_eq!(stored.slot, 1);
+    assert_eq!(stored.block_time, Some(123456));
+    let addresses = reopened
+        .get_confirmed_signatures_for_address2(recipient, 1, None, None, 10)
+        .unwrap();
+    assert_eq!(addresses.infos.len(), 1);
+    assert_eq!(addresses.infos[0].signature, signature);
+}
+
+#[test]
+fn test_experimental_pq_exact_status_batch_discovery_cleanup_and_reopen() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let success_signature = Signature::from([0x31; 64]);
+    let failed_signature = Signature::from([0x32; 64]);
+    let unrooted_signature = Signature::from([0x33; 64]);
+    let unpublished_signature = Signature::from([0x34; 64]);
+    let missing_signature = Signature::from([0x35; 64]);
+    let mut alias_bytes = [0x31; 64];
+    alias_bytes[63] ^= 1;
+    let alias = Signature::from(alias_bytes);
+    let success = TransactionStatusMeta {
+        fee: 5_000,
+        compute_units_consumed: Some(150),
+        pre_token_balances: Some(vec![]),
+        post_token_balances: Some(vec![]),
+        rewards: Some(vec![]),
+        ..TransactionStatusMeta::default()
+    };
+    let failed = TransactionStatusMeta {
+        status: Err(TransactionError::InstructionError(
+            0,
+            solana_instruction_error::InstructionError::Custom(7005),
+        )),
+        fee: 5_000,
+        pre_token_balances: Some(vec![]),
+        post_token_balances: Some(vec![]),
+        rewards: Some(vec![]),
+        ..TransactionStatusMeta::default()
+    };
+    let signatures = (0..256)
+        .map(|index| {
+            [
+                success_signature,
+                failed_signature,
+                unrooted_signature,
+                unpublished_signature,
+                missing_signature,
+                alias,
+            ][index % 6]
+        })
+        .collect::<Vec<_>>();
+    let expected = |cleaned: bool| {
+        signatures
+            .iter()
+            .map(|signature| {
+                if *signature == success_signature && !cleaned {
+                    Some((1, success.clone()))
+                } else if *signature == failed_signature {
+                    Some((3, failed.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        let signer = Keypair::new();
+        let template = VersionedTransaction::from(Transaction::new_signed_with_payer(
+            &[solana_system_interface::instruction::transfer(
+                &signer.pubkey(),
+                &Pubkey::new_unique(),
+                1,
+            )],
+            Some(&signer.pubkey()),
+            &[&signer],
+            Hash::new_unique(),
+        ));
+        for (slot, signature, metadata) in [
+            (1, success_signature, success.clone()),
+            (3, failed_signature, failed.clone()),
+            (4, unpublished_signature, success.clone()),
+        ] {
+            let commitment = [slot as u8; 48];
+            let mut transaction = template.clone();
+            transaction.signatures[0] = signature;
+            store
+                .put_experimental_pq_block(slot, commitment, b"authenticated test witness")
+                .unwrap();
+            store.set_roots([slot].iter()).unwrap();
+            store
+                .put_experimental_pq_rpc_block(
+                    slot,
+                    commitment,
+                    slot - 1,
+                    Hash::new_unique(),
+                    Hash::new_unique(),
+                    slot,
+                    123_456,
+                    &[(transaction, metadata, Vec::new())],
+                )
+                .unwrap();
+        }
+        store
+            .transaction_status_cf
+            .put_protobuf((unrooted_signature, 2), &success.clone().into())
+            .unwrap();
+        let mut discoveries = 0;
+        let statuses = store
+            .get_experimental_pq_rooted_statuses_with_discovery(&signatures, 3, || {
+                discoveries += 1;
+                assert!(store.lowest_cleanup_slot.try_write().is_err());
+                store.get_first_available_block()
+            })
+            .unwrap();
+        assert_eq!(discoveries, 1);
+        assert_eq!(statuses, expected(false));
+        assert_eq!(
+            store
+                .get_experimental_pq_rooted_transaction_statuses(&signatures, 3)
+                .unwrap(),
+            statuses
+        );
+        assert!(
+            store
+                .get_experimental_pq_rooted_transaction_statuses(&[unpublished_signature], 4)
+                .unwrap()[0]
+                .is_some()
+        );
+        assert!(
+            store
+                .get_experimental_pq_rooted_statuses_with_discovery(&[], 3, || {
+                    panic!("empty status batch must not read the ledger")
+                })
+                .unwrap()
+                .is_empty()
+        );
+        // The cleanup boundary hides statuses even before compaction removes
+        // them. Purging then reopening must retain later certified history.
+        *store.lowest_cleanup_slot.write().unwrap() = 1;
+        assert_eq!(
+            store
+                .get_experimental_pq_rooted_transaction_statuses(&signatures, 3)
+                .unwrap(),
+            expected(true)
+        );
+        store.purge_slots(0, 1, PurgeType::Exact).unwrap();
+    }
+    let reopened = Blockstore::open(directory.path()).unwrap();
+    assert_eq!(
+        reopened
+            .get_experimental_pq_rooted_transaction_statuses(&signatures, 3)
+            .unwrap(),
+        expected(true)
+    );
+}
+
+#[test]
+fn test_experimental_pq_large_rpc_archive_reopens_and_enforces_payload_bounds() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let signer = Keypair::new();
+    let recipient = Pubkey::new_unique();
+    let previous = Hash::new_unique();
+    let blockhash = Hash::new_unique();
+    let template = VersionedTransaction::from(Transaction::new_signed_with_payer(
+        &[solana_system_interface::instruction::transfer(
+            &signer.pubkey(),
+            &recipient,
+            7,
+        )],
+        Some(&signer.pubkey()),
+        &[&signer],
+        previous,
+    ));
+    let resize_wire = |transaction: &mut VersionedTransaction, target: usize| {
+        let current = wincode::serialize(transaction).unwrap().len();
+        let solana_message::VersionedMessage::Legacy(message) = &mut transaction.message else {
+            unreachable!();
+        };
+        let data = &mut message.instructions[0].data;
+        data.resize(data.len() + target - current, 0xe4);
+        *transaction =
+            VersionedTransaction::try_new(transaction.message.clone(), &[&signer]).unwrap();
+        assert_eq!(wincode::serialize(transaction).unwrap().len(), target);
+    };
+    let records = (0..PQ_RPC_MAX_TRANSACTIONS)
+        .map(|index| {
+            let mut transaction = template.clone();
+            // 8,192 transactions and their Core u32 framing fill exactly eight
+            // MiB, including the twelve-byte Core payload header.
+            let target = if index == 0 { 1008 } else { 1020 };
+            // Crossing short_vec's 128-byte length prefix adds one wire byte.
+            let solana_message::VersionedMessage::Legacy(message) = &mut transaction.message else {
+                unreachable!();
+            };
+            message.instructions[0].data.resize(128, 0xe4);
+            message.instructions[0].data[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            resize_wire(&mut transaction, target);
+            let status = TransactionStatusMeta {
+                fee: 5000,
+                pre_balances: vec![100_000, 100_000],
+                post_balances: vec![94_993, 100_007],
+                compute_units_consumed: Some(150),
+                log_messages: Some(vec![format!("native transaction {index}")]),
+                pre_token_balances: Some(vec![]),
+                post_token_balances: Some(vec![]),
+                rewards: Some(vec![]),
+                ..TransactionStatusMeta::default()
+            };
+            (
+                transaction,
+                status,
+                vec![(signer.pubkey(), true), (recipient, true)],
+            )
+        })
+        .collect::<Vec<_>>();
+    let wire_bytes = records
+        .iter()
+        .map(|record| wincode::serialize(&record.0).unwrap().len())
+        .sum::<usize>();
+    assert_eq!(
+        12 + records.len() * 4 + wire_bytes,
+        PQ_RPC_MAX_PAYLOAD_BYTES
+    );
+    assert!(wire_bytes > 4 * 1024 * 1024);
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        let mut journal = vec![0u8; 53];
+        journal[0] = 1;
+        store
+            .put_experimental_pq_block(1, [0xe5; 48], b"authenticated large native witness")
+            .unwrap();
+        store
+            .put_experimental_pq_checkpoint(&journal, &[(1, [0xe5; 48])])
+            .unwrap();
+        store
+            .put_experimental_pq_rpc_block(
+                1, [0xe5; 48], 0, previous, blockhash, 1, 123456, &records,
+            )
+            .unwrap();
+        let original = store
+            .experimental_pq_cf
+            .get_bytes((1, [0xff; 48]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            original.len(),
+            PQ_RPC_HEADER_BYTES + records.len() * 4 + wire_bytes
+        );
+
+        let mut excessive_count = records.clone();
+        excessive_count.push(records[0].clone());
+        assert!(
+            store
+                .put_experimental_pq_rpc_block(
+                    1,
+                    [0xe5; 48],
+                    0,
+                    previous,
+                    blockhash,
+                    1,
+                    123456,
+                    &excessive_count
+                )
+                .is_err()
+        );
+
+        // The archive's framing allowance cannot be used as extra TX payload.
+        // All individual wires remain far below the sixteen-KiB carrier cap.
+        let mut overflow = records.clone();
+        for record in &mut overflow {
+            resize_wire(&mut record.0, 1024);
+        }
+        resize_wire(&mut overflow.last_mut().unwrap().0, 1025);
+        let overflow_signature = overflow.last().unwrap().0.signatures[0];
+        assert_eq!(
+            overflow
+                .iter()
+                .map(|record| wincode::serialize(&record.0).unwrap().len())
+                .sum::<usize>(),
+            PQ_RPC_MAX_PAYLOAD_BYTES + 1
+        );
+        assert!(
+            store
+                .put_experimental_pq_rpc_block(
+                    1, [0xe5; 48], 0, previous, blockhash, 1, 123456, &overflow
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .get_rooted_transaction_status(overflow_signature)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .experimental_pq_cf
+                .get_bytes((1, [0xff; 48]))
+                .unwrap()
+                .unwrap(),
+            original
+        );
+
+        // A canonical but over-payload archive can fit the total container
+        // bound because not every framing slot is needed. Its reader must
+        // still reject it independently of the writer's checks.
+        let mut forged = original[..PQ_RPC_HEADER_BYTES].to_vec();
+        for (transaction, _, _) in &overflow {
+            let wire = wincode::serialize(transaction).unwrap();
+            forged.extend_from_slice(&(wire.len() as u32).to_le_bytes());
+            forged.extend_from_slice(&wire);
+        }
+        // A full-count archive is also one byte over the container maximum;
+        // shorten the declared count and one transaction to leave framing
+        // slack, while adding its removed wire bytes to the first wire.
+        // The per-TX cap remains valid throughout.
+        let last_wire = wincode::serialize(&overflow.last().unwrap().0)
+            .unwrap()
+            .len();
+        forged.truncate(forged.len() - last_wire - 4);
+        forged[144..148].copy_from_slice(&((PQ_RPC_MAX_TRANSACTIONS - 1) as u32).to_le_bytes());
+        let mut enlarged = overflow[0].0.clone();
+        resize_wire(&mut enlarged, 1024 + last_wire);
+        let wire = wincode::serialize(&enlarged).unwrap();
+        forged.splice(
+            PQ_RPC_HEADER_BYTES..PQ_RPC_HEADER_BYTES + 4 + 1024,
+            (wire.len() as u32).to_le_bytes().into_iter().chain(wire),
+        );
+        assert!(forged.len() <= PQ_RPC_MAX_ARCHIVE_BYTES);
+        assert_eq!(
+            forged.len() - PQ_RPC_HEADER_BYTES - (PQ_RPC_MAX_TRANSACTIONS - 1) * 4,
+            PQ_RPC_MAX_PAYLOAD_BYTES + 1
+        );
+        store
+            .experimental_pq_cf
+            .put_bytes((1, [0xff; 48]), &forged)
+            .unwrap();
+        assert_matches!(
+            store.read_experimental_pq_rpc_block(1),
+            Err(BlockstoreError::InvalidShredData(reason)) if reason == "PQ RPC wire bounds"
+        );
+        store
+            .experimental_pq_cf
+            .put_bytes((1, [0xff; 48]), &original)
+            .unwrap();
+    }
+    let reopened = Blockstore::open(directory.path()).unwrap();
+    let block = reopened.get_rooted_block(1, true).unwrap();
+    assert_eq!(block.transactions.len(), PQ_RPC_MAX_TRANSACTIONS);
+    for (stored, expected) in block.transactions.iter().zip(&records) {
+        assert_eq!(stored.transaction, expected.0);
+        assert_eq!(stored.meta, expected.1);
+    }
+    let last = records.last().unwrap();
+    assert_eq!(
+        reopened
+            .get_rooted_transaction_status(last.0.signatures[0])
+            .unwrap()
+            .unwrap(),
+        (1, last.1.clone())
+    );
+    let stored = reopened
+        .get_rooted_transaction(last.0.signatures[0])
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.index, PQ_RPC_MAX_TRANSACTIONS as u32 - 1);
+    assert_eq!(stored.tx_with_meta.get_transaction(), last.0);
+    let addresses = reopened
+        .get_confirmed_signatures_for_address2(recipient, 1, None, None, 1)
+        .unwrap();
+    assert_eq!(addresses.infos[0].signature, last.0.signatures[0]);
+}
+
+fn pq_clock_checkpoint(ticks: &[u64]) -> Vec<u8> {
+    let mut journal = vec![0u8; 53];
+    journal[0] = 1;
+    journal[1..49].fill(0xa2);
+    journal[49..53].copy_from_slice(&(ticks.len() as u32).to_le_bytes());
+    for tick in ticks {
+        journal.push(0);
+        journal.extend_from_slice(&tick.to_le_bytes());
+    }
+    journal
+}
+
+#[test]
+fn test_experimental_pq_streaming_hash_preserves_sha2_metadata_and_reopen() {
+    use sha2::{Digest, Sha384};
+
+    for version in [b"PQJNL002", b"PQJNL003"] {
+        let directory = tempfile::TempDir::new().unwrap();
+        let expected = pq_clock_checkpoint(&[10, 20, 30, 40]);
+        {
+            let store = Blockstore::open(directory.path()).unwrap();
+            let initial = pq_clock_checkpoint(&[10, 20]);
+            let body = &initial[53..];
+            // Independently construct the historical on-disk bytes using the
+            // old Rust SHA-384, without calling either production encoder.
+            let mut reference = Sha384::new();
+            if version == b"PQJNL003" {
+                reference.update(b"agave/pq/durable-recovery-journal-body/v2");
+            } else {
+                let domain = b"agave-pq-journal-prefix-v1";
+                reference.update(b"agave-pq-commitment-v1");
+                reference.update((domain.len() as u64).to_le_bytes());
+                reference.update(domain);
+                reference.update(1u64.to_le_bytes());
+                reference.update((body.len() as u64).to_le_bytes());
+            }
+            reference.update(body);
+            let mut metadata = version.to_vec();
+            metadata.extend_from_slice(&2u64.to_le_bytes());
+            metadata.extend_from_slice(&(body.len() as u64).to_le_bytes());
+            metadata.extend_from_slice(&initial[..53]);
+            metadata.extend_from_slice(&reference.finalize());
+            assert_eq!(metadata.len(), 125);
+            let mut batch = store.db.batch();
+            for (index, tick) in body.as_chunks::<9>().0.iter().enumerate() {
+                let mut key = [0; 48];
+                key[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+                key[47] = 1;
+                store
+                    .experimental_pq_cf
+                    .put_bytes_in_batch(&mut batch, (0, key), tick);
+            }
+            store
+                .experimental_pq_cf
+                .put_bytes_in_batch(&mut batch, (0, [0; 48]), &metadata);
+            store.db.write_sync(batch).unwrap();
+            assert_eq!(
+                store.get_experimental_pq_checkpoint().unwrap(),
+                Some(initial)
+            );
+            for (ticks, previous) in [(&[10, 20, 30][..], 2), (&[10, 20, 30, 40][..], 3)] {
+                let checkpoint = pq_clock_checkpoint(ticks);
+                store
+                    .append_experimental_pq_checkpoint(
+                        checkpoint[..53].try_into().unwrap(),
+                        previous,
+                        &checkpoint[53 + previous as usize * 9..],
+                        &[],
+                    )
+                    .unwrap();
+                let mut reference = Sha384::new();
+                reference.update(b"agave/pq/durable-recovery-journal-body/v2");
+                reference.update(&checkpoint[53..]);
+                let mut metadata = b"PQJNL003".to_vec();
+                metadata.extend_from_slice(&(ticks.len() as u64).to_le_bytes());
+                metadata.extend_from_slice(&((checkpoint.len() - 53) as u64).to_le_bytes());
+                metadata.extend_from_slice(&checkpoint[..53]);
+                metadata.extend_from_slice(&reference.finalize());
+                assert_eq!(
+                    store.experimental_pq_cf.get_bytes((0, [0; 48])).unwrap(),
+                    Some(metadata)
+                );
+                assert_eq!(
+                    store.get_experimental_pq_checkpoint().unwrap(),
+                    Some(checkpoint.clone())
+                );
+                // The compatibility writer invalidates the cached native
+                // continuation; the next append must rebuild it correctly.
+                store
+                    .put_experimental_pq_checkpoint(&checkpoint, &[])
+                    .unwrap();
+                assert!(store.experimental_pq_journal.lock().unwrap().is_none());
+            }
+        }
+        let reopened = Blockstore::open(directory.path()).unwrap();
+        assert_eq!(
+            reopened.get_experimental_pq_checkpoint().unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            agave_pq_crypto::quantumglow::RecoveryJournal::decode(&expected)
+                .unwrap()
+                .encode()
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn test_experimental_pq_journal_progresses_while_immutable_insertion_is_locked() {
+    for incremental in [false, true] {
+        let directory = tempfile::TempDir::new().unwrap();
+        let store = Blockstore::open(directory.path()).unwrap();
+        let journal = pq_clock_checkpoint(&[10]);
+        let header: [u8; 53] = journal[..53].try_into().unwrap();
+        let insertion = store.insert_shreds_lock.lock().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let completed = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let result = if incremental {
+                    store.append_experimental_pq_checkpoint(&header, 0, &journal[53..], &[])
+                } else {
+                    store.put_experimental_pq_checkpoint(&journal, &[])
+                };
+                sent.send(result).unwrap();
+            });
+            // The lock is held for the entire observation. Always release it
+            // before joining, including on the old implementation's timeout.
+            let completed = received.recv_timeout(Duration::from_secs(5));
+            drop(insertion);
+            worker.join().unwrap();
+            completed
+        });
+        completed
+            .expect("independent journal write waited for immutable insertion")
+            .unwrap();
+        assert_eq!(
+            store.get_experimental_pq_checkpoint().unwrap(),
+            Some(journal)
+        );
+    }
+}
+
+#[test]
+fn test_experimental_pq_immutable_writes_progress_while_journal_is_locked() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let store = Blockstore::open(directory.path()).unwrap();
+    let journal_guard = store.experimental_pq_journal.lock().unwrap();
+    let intent = streaming_proposal_intent(17, b"exact immutable payload".to_vec());
+    let commitment = [0x8a; 48];
+    let witness = b"immutable authenticated witness";
+    let (sent, received) = std::sync::mpsc::channel();
+    let completed = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let result = (|| -> Result<()> {
+                store.put_experimental_pq_proposal_intent(&intent)?;
+                store.put_experimental_pq_local_block(17, commitment, witness)?;
+                store.put_experimental_pq_block(18, commitment, witness)
+            })();
+            sent.send(result).unwrap();
+        });
+        let completed = received.recv_timeout(Duration::from_secs(5));
+        drop(journal_guard);
+        worker.join().unwrap();
+        completed
+    });
+    completed
+        .expect("immutable body/intent writes waited for journal metadata")
+        .unwrap();
+    for (slot, hash) in [(17, [0; 48]), (17, commitment), (18, commitment)] {
+        assert_eq!(
+            store.get_experimental_pq_block(slot, hash).unwrap(),
+            Some(witness.to_vec())
+        );
+    }
+    assert_eq!(
+        store.get_experimental_pq_proposal_intent(17).unwrap(),
+        Some(intent)
+    );
+    assert!(!store.is_root(17));
+    assert_eq!(store.experimental_pq_journal_usage().unwrap(), None);
+}
+
+#[test]
+fn test_experimental_pq_concurrent_full_and_incremental_writers_preserve_prefix() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let expected;
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        let initial = pq_clock_checkpoint(&[10]);
+        store
+            .append_experimental_pq_checkpoint(
+                initial[..53].try_into().unwrap(),
+                0,
+                &initial[53..],
+                &[],
+            )
+            .unwrap();
+        let full = pq_clock_checkpoint(&[10, 20]);
+        let incremental = pq_clock_checkpoint(&[10, 30]);
+        let barrier = std::sync::Barrier::new(2);
+        let (full_result, incremental_result) = std::thread::scope(|scope| {
+            let full_worker = scope.spawn(|| {
+                barrier.wait();
+                store.put_experimental_pq_checkpoint(&full, &[])
+            });
+            let incremental_worker = scope.spawn(|| {
+                barrier.wait();
+                store.append_experimental_pq_checkpoint(
+                    incremental[..53].try_into().unwrap(),
+                    1,
+                    &incremental[62..],
+                    &[],
+                )
+            });
+            (
+                full_worker.join().unwrap(),
+                incremental_worker.join().unwrap(),
+            )
+        });
+        assert_ne!(
+            full_result.is_ok(),
+            incremental_result.is_ok(),
+            "exactly one conflicting cursor/prefix may commit"
+        );
+        let winner = if full_result.is_ok() { 20 } else { 30 };
+        let prefix = pq_clock_checkpoint(&[10, winner]);
+        assert_eq!(
+            store.get_experimental_pq_checkpoint().unwrap(),
+            Some(prefix)
+        );
+        expected = pq_clock_checkpoint(&[10, winner, 40]);
+        store
+            .append_experimental_pq_checkpoint(
+                expected[..53].try_into().unwrap(),
+                2,
+                &expected[71..],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_experimental_pq_checkpoint().unwrap(),
+            Some(expected.clone())
+        );
+    }
+    let reopened = Blockstore::open(directory.path()).unwrap();
+    assert_eq!(
+        reopened.get_experimental_pq_checkpoint().unwrap(),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        agave_pq_crypto::quantumglow::RecoveryJournal::decode(&expected)
+            .unwrap()
+            .encode()
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn test_experimental_pq_pending_body_does_not_authorize_a_journal_root() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let store = Blockstore::open(directory.path()).unwrap();
+    let commitment = [0x8b; 48];
+    let journal = pq_clock_checkpoint(&[10]);
+    let header: [u8; 53] = journal[..53].try_into().unwrap();
+    let insertion = store.insert_shreds_lock.lock().unwrap();
+    let (sent, received) = std::sync::mpsc::channel();
+    let (failed, before) = std::thread::scope(|scope| {
+        let body =
+            scope.spawn(|| store.put_experimental_pq_block(9, commitment, b"durable witness"));
+        let append = scope.spawn(|| {
+            sent.send(store.append_experimental_pq_checkpoint(
+                &header,
+                0,
+                &journal[53..],
+                &[(9, commitment)],
+            ))
+            .unwrap();
+        });
+        let failed = received.recv_timeout(Duration::from_secs(5));
+        let before = (
+            store.is_root(9),
+            store.experimental_pq_journal_usage().unwrap(),
+        );
+        drop(insertion);
+        body.join().unwrap().unwrap();
+        append.join().unwrap();
+        (failed, before)
+    });
+    assert!(
+        failed
+            .expect("missing-witness check waited for unrelated insertion")
+            .is_err()
+    );
+    assert_eq!(before, (false, None));
+    store
+        .append_experimental_pq_checkpoint(&header, 0, &journal[53..], &[(9, commitment)])
+        .unwrap();
+    assert!(store.is_root(9));
+    assert_eq!(store.max_root(), 9);
+    assert_eq!(
+        store.get_experimental_pq_checkpoint().unwrap(),
+        Some(journal)
+    );
+}
+
+#[test]
+fn test_experimental_pq_incremental_migration_reopen_and_cursor_validation() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut journal = vec![0u8; 53];
+    journal[0] = 1;
+    journal[1..49].fill(0x61);
+    journal[49..53].copy_from_slice(&1u32.to_le_bytes());
+    journal.push(0);
+    journal.extend_from_slice(&100u64.to_le_bytes());
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        store.put_experimental_pq_checkpoint(&journal, &[]).unwrap();
+        assert!(
+            store
+                .experimental_pq_cf
+                .get_bytes((0, [0; 48]))
+                .unwrap()
+                .unwrap()
+                .starts_with(b"PQJNL002")
+        );
+        journal[49..53].copy_from_slice(&2u32.to_le_bytes());
+        let second = [0u8]
+            .into_iter()
+            .chain(200u64.to_le_bytes())
+            .collect::<Vec<_>>();
+        store
+            .put_experimental_pq_block(1, [0x62; 48], b"authenticated witness")
+            .unwrap();
+        store
+            .append_experimental_pq_checkpoint(
+                journal[..53].try_into().unwrap(),
+                1,
+                &second,
+                &[(1, [0x62; 48])],
+            )
+            .unwrap();
+        journal.extend_from_slice(&second);
+        assert!(store.is_root(1));
+        assert!(
+            store
+                .experimental_pq_cf
+                .get_bytes((0, [0; 48]))
+                .unwrap()
+                .unwrap()
+                .starts_with(b"PQJNL003")
+        );
+        assert_eq!(
+            store.get_experimental_pq_checkpoint().unwrap().unwrap(),
+            journal
+        );
+        let mut third_header: [u8; 53] = journal[..53].try_into().unwrap();
+        third_header[49..53].copy_from_slice(&3u32.to_le_bytes());
+        assert!(
+            store
+                .append_experimental_pq_checkpoint(&third_header, 1, &second, &[])
+                .is_err()
+        );
+        assert!(
+            store
+                .append_experimental_pq_checkpoint(&third_header, 2, &second, &[(2, [0x63; 48])])
+                .is_err()
+        );
+        assert!(!store.is_root(2));
+        let mut wrong_binding = third_header;
+        wrong_binding[1] ^= 1;
+        assert!(
+            store
+                .append_experimental_pq_checkpoint(&wrong_binding, 2, &second, &[])
+                .is_err()
+        );
+        assert_eq!(
+            store.get_experimental_pq_checkpoint().unwrap().unwrap(),
+            journal
+        );
+        // The full-checkpoint compatibility path must preserve the streaming
+        // metadata format, validate its prefix, and invalidate cached context.
+        store.put_experimental_pq_checkpoint(&journal, &[]).unwrap();
+        let mut modified = journal.clone();
+        modified[53] ^= 1;
+        assert!(
+            store
+                .put_experimental_pq_checkpoint(&modified, &[])
+                .is_err()
+        );
+    }
+    let reopened = Blockstore::open(directory.path()).unwrap();
+    assert_eq!(
+        reopened.get_experimental_pq_checkpoint().unwrap().unwrap(),
+        journal
+    );
+    journal[49..53].copy_from_slice(&3u32.to_le_bytes());
+    let third = [0u8]
+        .into_iter()
+        .chain(300u64.to_le_bytes())
+        .collect::<Vec<_>>();
+    reopened
+        .append_experimental_pq_checkpoint(journal[..53].try_into().unwrap(), 2, &third, &[])
+        .unwrap();
+    journal.extend_from_slice(&third);
+    assert_eq!(
+        reopened.get_experimental_pq_checkpoint().unwrap().unwrap(),
+        journal
+    );
+    assert_eq!(
+        agave_pq_crypto::quantumglow::RecoveryJournal::decode(&journal)
+            .unwrap()
+            .encode()
+            .unwrap(),
+        journal
+    );
+}
+
+#[test]
+fn test_experimental_pq_incremental_reopen_detects_historical_corruption() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut header = [0u8; 53];
+    header[0] = 1;
+    header[49..53].copy_from_slice(&1u32.to_le_bytes());
+    let first = [0u8]
+        .into_iter()
+        .chain(100u64.to_le_bytes())
+        .collect::<Vec<_>>();
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        store
+            .append_experimental_pq_checkpoint(&header, 0, &first, &[])
+            .unwrap();
+        let mut key = [0; 48];
+        key[..8].copy_from_slice(&1u64.to_be_bytes());
+        key[47] = 1;
+        let mut corrupted = first.clone();
+        corrupted[2] ^= 1;
+        let mut batch = store.db.batch();
+        store
+            .experimental_pq_cf
+            .put_bytes_in_batch(&mut batch, (0, key), &corrupted);
+        store.db.write_sync(batch).unwrap();
+    }
+    let reopened = Blockstore::open(directory.path()).unwrap();
+    assert!(reopened.get_experimental_pq_checkpoint().is_err());
+    let mut visited = 0;
+    assert!(
+        reopened
+            .visit_experimental_pq_journal(|_, _| {
+                visited += 1;
+                Ok(())
+            })
+            .is_err()
+    );
+    assert_eq!(visited, 0, "whole durable prefix is checked before replay");
+    header[49..53].copy_from_slice(&2u32.to_le_bytes());
+    assert!(
+        reopened
+            .append_experimental_pq_checkpoint(&header, 1, &first, &[])
+            .is_err()
+    );
+}
+
+#[test]
+fn test_experimental_pq_sequential_journal_namespace_and_preflight_bounds() {
+    for streaming in [false, true] {
+        let directory = tempfile::TempDir::new().unwrap();
+        let store = Blockstore::open(directory.path()).unwrap();
+        let mut header = [0u8; 53];
+        header[0] = 1;
+        header[1..49].fill(0x85);
+        let ticks = [100u64, 200].map(|time| {
+            [0u8]
+                .into_iter()
+                .chain(time.to_le_bytes())
+                .collect::<Vec<_>>()
+        });
+        let mut journal = header.to_vec();
+        for (index, tick) in ticks.iter().enumerate() {
+            header[49..53].copy_from_slice(&(index as u32 + 1).to_le_bytes());
+            if streaming {
+                store
+                    .append_experimental_pq_checkpoint(&header, index as u32, tick, &[])
+                    .unwrap();
+            } else {
+                journal[..53].copy_from_slice(&header);
+                journal.extend_from_slice(tick);
+                store.put_experimental_pq_checkpoint(&journal, &[]).unwrap();
+            }
+        }
+        let chunk_key = |sequence: u64| {
+            let mut key = [0; 48];
+            key[..8].copy_from_slice(&sequence.to_be_bytes());
+            key[47] = 1;
+            key
+        };
+        // A foreign slot-zero record sorts between declared chunks. Neither
+        // its body nor a well-formed undeclared chunk belongs to this journal.
+        let mut foreign = chunk_key(1);
+        foreign[8] = 0x86;
+        store
+            .experimental_pq_cf
+            .put_bytes((0, foreign), &[])
+            .unwrap();
+        store
+            .experimental_pq_cf
+            .put_bytes((0, chunk_key(3)), &[])
+            .unwrap();
+        let mut bodies = Vec::new();
+        assert_eq!(
+            store
+                .visit_experimental_pq_journal(|seen_header, body| {
+                    assert_eq!(*seen_header, header);
+                    bodies.push(body.to_vec());
+                    Ok(())
+                })
+                .unwrap(),
+            Some(header)
+        );
+        assert_eq!(bodies, ticks);
+        let mut callbacks = 0;
+        for malformed in [vec![], vec![0; 64 * 1024 * 1024 + 1]] {
+            store
+                .experimental_pq_cf
+                .put_bytes((0, chunk_key(2)), &malformed)
+                .unwrap();
+            assert_matches!(
+                store.visit_experimental_pq_journal(|_, _| {
+                    callbacks += 1;
+                    Ok(())
+                }),
+                Err(BlockstoreError::InvalidShredData(message))
+                    if message == "PQ journal chunk bounds"
+            );
+        }
+        store.experimental_pq_cf.delete((0, chunk_key(2))).unwrap();
+        assert_matches!(
+            store.visit_experimental_pq_journal(|_, _| {
+                callbacks += 1;
+                Ok(())
+            }),
+            Err(BlockstoreError::InvalidShredData(message))
+                if message == "PQ journal chunk missing"
+        );
+        let mut corrupt = ticks[1].clone();
+        corrupt[1] ^= 1;
+        store
+            .experimental_pq_cf
+            .put_bytes((0, chunk_key(2)), &corrupt)
+            .unwrap();
+        assert_matches!(
+            store.visit_experimental_pq_journal(|_, _| {
+                callbacks += 1;
+                Ok(())
+            }),
+            Err(BlockstoreError::InvalidShredData(message))
+                if message == "PQ journal streaming checksum"
+        );
+        assert_eq!(
+            callbacks, 0,
+            "all chunks validate before the first callback"
+        );
+    }
+}
+
+#[test]
+fn test_experimental_pq_sequential_journal_detects_callback_chunk_mutation() {
+    for streaming in [false, true] {
+        for changed_sequence in [1u64, 2] {
+            let directory = tempfile::TempDir::new().unwrap();
+            let store = Blockstore::open(directory.path()).unwrap();
+            let mut header = [0u8; 53];
+            header[0] = 1;
+            header[1..49].fill(0x87);
+            let ticks = [100u64, 200].map(|time| {
+                [0u8]
+                    .into_iter()
+                    .chain(time.to_le_bytes())
+                    .collect::<Vec<_>>()
+            });
+            let mut journal = header.to_vec();
+            for (index, tick) in ticks.iter().enumerate() {
+                header[49..53].copy_from_slice(&(index as u32 + 1).to_le_bytes());
+                if streaming {
+                    store
+                        .append_experimental_pq_checkpoint(&header, index as u32, tick, &[])
+                        .unwrap();
+                } else {
+                    journal[..53].copy_from_slice(&header);
+                    journal.extend_from_slice(tick);
+                    store.put_experimental_pq_checkpoint(&journal, &[]).unwrap();
+                }
+            }
+            let metadata = store.experimental_pq_cf.get_bytes((0, [0; 48])).unwrap();
+            let mut bodies = Vec::new();
+            assert_matches!(
+                store.visit_experimental_pq_journal(|_, body| {
+                    if bodies.is_empty() {
+                        let mut key = [0; 48];
+                        key[..8].copy_from_slice(&changed_sequence.to_be_bytes());
+                        key[47] = 1;
+                        let mut changed = ticks[changed_sequence as usize - 1].clone();
+                        changed[1] ^= 1;
+                        // Deliberately bypass the writer's immutable-prefix
+                        // checks without changing any metadata. The old value
+                        // remains pinned by the replay iterator's snapshot.
+                        store.experimental_pq_cf.put_bytes((0, key), &changed)?;
+                    }
+                    bodies.push(body.to_vec());
+                    Ok(())
+                }),
+                Err(BlockstoreError::InvalidShredData(message))
+                    if message == "PQ journal changed during replay"
+            );
+            assert_eq!(bodies, ticks, "replay snapshot must stay stable");
+            assert_eq!(
+                store.experimental_pq_cf.get_bytes((0, [0; 48])).unwrap(),
+                metadata
+            );
+        }
+    }
+}
+
+#[test]
+fn test_experimental_pq_streams_long_journal_and_reopens_accumulator() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut header = [0u8; 53];
+    header[0] = 1;
+    header[1..49].fill(0x71);
+    header[49..53].copy_from_slice(&1u32.to_le_bytes());
+    let tick = [0u8]
+        .into_iter()
+        .chain(100u64.to_le_bytes())
+        .collect::<Vec<_>>();
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        let mut initial = header.to_vec();
+        initial.extend_from_slice(&tick);
+        store.put_experimental_pq_checkpoint(&initial, &[]).unwrap();
+        let mut streamed = Vec::new();
+        assert_eq!(
+            store
+                .visit_experimental_pq_journal(|seen_header, body| {
+                    assert_eq!(*seen_header, header);
+                    streamed.extend_from_slice(body);
+                    Ok(())
+                })
+                .unwrap(),
+            Some(header)
+        );
+        assert_eq!(streamed, tick);
+        // More records than the previous complete-history decoder permitted.
+        header[49..53].copy_from_slice(&70_000u32.to_le_bytes());
+        store
+            .append_experimental_pq_checkpoint(&header, 1, &tick.repeat(69_999), &[])
+            .unwrap();
+    }
+    let reopened = Blockstore::open(directory.path()).unwrap();
+    let mut bytes = 0;
+    let mut chunks = 0;
+    assert_eq!(
+        reopened
+            .visit_experimental_pq_journal(|seen_header, body| {
+                assert_eq!(*seen_header, header);
+                assert!(body.len() <= 64 * 1024 * 1024);
+                assert!(body.as_chunks::<9>().1.is_empty());
+                assert!(
+                    body.as_chunks::<9>()
+                        .0
+                        .iter()
+                        .all(|record| record == &tick[..])
+                );
+                chunks += 1;
+                bytes += body.len();
+                Ok(())
+            })
+            .unwrap(),
+        Some(header)
+    );
+    assert_eq!(chunks, 2);
+    assert_eq!(bytes, 70_000 * 9);
+    header[49..53].copy_from_slice(&70_001u32.to_le_bytes());
+    reopened
+        .append_experimental_pq_checkpoint(&header, 70_000, &tick, &[])
+        .unwrap();
+    let mut recovered_records = 0;
+    reopened
+        .visit_experimental_pq_journal(|_, body| {
+            recovered_records += body.len() / 9;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(recovered_records, 70_001);
+}
+
+#[test]
+fn test_experimental_pq_journal_usage_reports_real_append_without_reading_history() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut header = [0u8; 53];
+    header[0] = 1;
+    header[1..49].fill(0x82);
+    let tick = [0u8]
+        .into_iter()
+        .chain(100u64.to_le_bytes())
+        .collect::<Vec<_>>();
+    let expected = ExperimentalPqJournalUsage {
+        body_bytes: 27,
+        records: 3,
+        chunks: 2,
+    };
+    {
+        let store = Blockstore::open(directory.path()).unwrap();
+        assert_eq!(store.experimental_pq_journal_usage().unwrap(), None);
+        header[49..53].copy_from_slice(&1u32.to_le_bytes());
+        store
+            .append_experimental_pq_checkpoint(&header, 0, &tick, &[])
+            .unwrap();
+        assert_eq!(
+            store.experimental_pq_journal_usage().unwrap(),
+            Some(ExperimentalPqJournalUsage {
+                body_bytes: 9,
+                records: 1,
+                chunks: 1
+            })
+        );
+        header[49..53].copy_from_slice(&3u32.to_le_bytes());
+        store
+            .append_experimental_pq_checkpoint(&header, 1, &tick.repeat(2), &[])
+            .unwrap();
+        assert_eq!(
+            store.experimental_pq_journal_usage().unwrap(),
+            Some(expected)
+        );
+    }
+    let reopened = Blockstore::open(directory.path()).unwrap();
+    assert_eq!(
+        reopened.experimental_pq_journal_usage().unwrap(),
+        Some(expected)
+    );
+    let mut visited = 0;
+    reopened
+        .visit_experimental_pq_journal(|_, body| {
+            visited += body.len();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(visited, expected.body_bytes as usize);
+
+    // Diagnostics must remain metadata-only. Corrupt an actual historical
+    // chunk: usage still reports stored counters, but replay fails before any
+    // visitor call. The getter is never an authentication/integrity shortcut.
+    let mut key = [0; 48];
+    key[..8].copy_from_slice(&1u64.to_be_bytes());
+    key[47] = 1;
+    let mut corrupted = tick;
+    corrupted[1] ^= 1;
+    let mut batch = reopened.db.batch();
+    reopened
+        .experimental_pq_cf
+        .put_bytes_in_batch(&mut batch, (0, key), &corrupted);
+    reopened.db.write_sync(batch).unwrap();
+    assert_eq!(
+        reopened.experimental_pq_journal_usage().unwrap(),
+        Some(expected)
+    );
+    let mut callbacks = 0;
+    assert!(
+        reopened
+            .visit_experimental_pq_journal(|_, _| {
+                callbacks += 1;
+                Ok(())
+            })
+            .is_err()
+    );
+    assert_eq!(callbacks, 0);
+}
+
+#[test]
+fn test_experimental_pq_journal_budget_rejects_oversized_metadata_before_body_work() {
+    assert_eq!(
+        MAX_EXPERIMENTAL_PQ_JOURNAL_BYTES,
+        256u64 * 1024 * 1024 * 1024
+    );
+    let directory = tempfile::TempDir::new().unwrap();
+    let store = Blockstore::open(directory.path()).unwrap();
+    let mut metadata = vec![0u8; 125];
+    metadata[..8].copy_from_slice(b"PQJNL003");
+    metadata[8..16].copy_from_slice(&4096u64.to_le_bytes());
+    metadata[16..24].copy_from_slice(&MAX_EXPERIMENTAL_PQ_JOURNAL_BYTES.to_le_bytes());
+    metadata[24] = 1;
+    metadata[73..77].copy_from_slice(&4096u32.to_le_bytes());
+    let store_metadata = |bytes: &[u8]| {
+        let mut batch = store.db.batch();
+        store
+            .experimental_pq_cf
+            .put_bytes_in_batch(&mut batch, (0, [0; 48]), bytes);
+        store.db.write_sync(batch).unwrap();
+    };
+    store_metadata(&metadata);
+    // No chunks exist. A getter that scanned history would fail here instead
+    // of reporting the fixed metadata at the exact configured bound.
+    assert_eq!(
+        store.experimental_pq_journal_usage().unwrap(),
+        Some(ExperimentalPqJournalUsage {
+            body_bytes: MAX_EXPERIMENTAL_PQ_JOURNAL_BYTES,
+            records: 4096,
+            chunks: 4096,
+        })
+    );
+    let mut header: [u8; 53] = metadata[24..77].try_into().unwrap();
+    header[49..53].copy_from_slice(&4097u32.to_le_bytes());
+    let tick = [0u8]
+        .into_iter()
+        .chain(100u64.to_le_bytes())
+        .collect::<Vec<_>>();
+    assert_matches!(store.append_experimental_pq_checkpoint(&header, 4096, &tick, &[]),
+        Err(BlockstoreError::InvalidShredData(message)) if message == "PQ incremental journal cumulative bounds");
+
+    metadata[16..24].copy_from_slice(&(MAX_EXPERIMENTAL_PQ_JOURNAL_BYTES + 1).to_le_bytes());
+    store_metadata(&metadata);
+    assert_matches!(store.experimental_pq_journal_usage(),
+        Err(BlockstoreError::InvalidShredData(message)) if message == "PQ journal streaming bounds");
+    let mut callbacks = 0;
+    assert_matches!(store.visit_experimental_pq_journal(|_, _| { callbacks += 1; Ok(()) }),
+        Err(BlockstoreError::InvalidShredData(message)) if message == "PQ journal streaming bounds");
+    assert_eq!(callbacks, 0);
+    assert_matches!(store.append_experimental_pq_checkpoint(&header, 4096, &tick, &[]),
+        Err(BlockstoreError::InvalidShredData(message)) if message == "PQ incremental journal cumulative bounds");
+
+    let mut small = metadata.clone();
+    small[8..16].copy_from_slice(&1u64.to_le_bytes());
+    small[16..24].copy_from_slice(&9u64.to_le_bytes());
+    small[73..77].copy_from_slice(&1u32.to_le_bytes());
+    for malformed in [
+        vec![0u8; 124],
+        {
+            let mut m = small.clone();
+            m[..8].copy_from_slice(b"PQJNL999");
+            m
+        },
+        {
+            let mut m = small.clone();
+            m[24] = 0;
+            m
+        },
+        {
+            let mut m = small.clone();
+            m[16..24].copy_from_slice(&(u64::from(4_194_305u32) * 9).to_le_bytes());
+            m[73..77].copy_from_slice(&4_194_305u32.to_le_bytes());
+            m
+        },
+        {
+            let mut m = small.clone();
+            m[8..16].copy_from_slice(&4_194_305u64.to_le_bytes());
+            m
+        },
+        {
+            let mut m = small.clone();
+            m[16..24].copy_from_slice(&8u64.to_le_bytes());
+            m
+        },
+    ] {
+        store_metadata(&malformed);
+        assert!(store.experimental_pq_journal_usage().is_err());
+    }
+}
+
+#[test]
+#[ignore = "storage checksum A/B microbenchmark; prints timings without asserting \
+            hardware-dependent ratios"]
+fn benchmark_experimental_pq_incremental_journal_storage() {
+    // Opaque historical record bytes isolate storage hashing from consensus and
+    // SVM execution. This does not measure transaction or cluster throughput.
+    let baseline_dir = tempfile::TempDir::new().unwrap();
+    let incremental_dir = tempfile::TempDir::new().unwrap();
+    let baseline = Blockstore::open(baseline_dir.path()).unwrap();
+    let incremental = Blockstore::open(incremental_dir.path()).unwrap();
+    let history_bytes = 8 * 1024 * 1024;
+    let mut journal = vec![0u8; history_bytes + 53];
+    journal[0] = 1;
+    journal[49..53].copy_from_slice(&1u32.to_le_bytes());
+    baseline
+        .put_experimental_pq_checkpoint(&journal, &[])
+        .unwrap();
+    incremental
+        .append_experimental_pq_checkpoint(
+            journal[..53].try_into().unwrap(),
+            0,
+            &journal[53..],
+            &[],
+        )
+        .unwrap();
+    let updates = 100u32;
+    let tick = [0u8]
+        .into_iter()
+        .chain(100u64.to_le_bytes())
+        .collect::<Vec<_>>();
+    let started = std::time::Instant::now();
+    for index in 0..updates {
+        journal[49..53].copy_from_slice(&(index + 2).to_le_bytes());
+        journal.extend_from_slice(&tick);
+        baseline
+            .put_experimental_pq_checkpoint(&journal, &[])
+            .unwrap();
+    }
+    let baseline_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let started = std::time::Instant::now();
+    for index in 0..updates {
+        let mut header: [u8; 53] = journal[..53].try_into().unwrap();
+        header[49..53].copy_from_slice(&(index + 2).to_le_bytes());
+        incremental
+            .append_experimental_pq_checkpoint(&header, index + 1, &tick, &[])
+            .unwrap();
+    }
+    let incremental_ms = started.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(
+        baseline.get_experimental_pq_checkpoint().unwrap(),
+        incremental.get_experimental_pq_checkpoint().unwrap()
+    );
+    eprintln!(
+        "PQ journal storage benchmark: history_bytes={history_bytes} updates={updates} \
+         baseline_ms={baseline_ms:.3} incremental_ms={incremental_ms:.3} speedup={:.2}",
+        baseline_ms / incremental_ms
+    );
+}
+
 // used for tests only
 pub(crate) fn make_slot_entries_with_transactions(num_entries: u64) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();

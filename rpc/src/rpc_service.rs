@@ -144,6 +144,19 @@ pub struct JsonRpcService {
     client_updater: Arc<dyn NotifyKeyUpdate + Send + Sync>,
 }
 
+/// PQ registry credentials are managed by the PQ service, not by rotation of a
+/// classical TPU certificate through the RPC forwarding client.
+struct PqClientKeyUpdater;
+
+impl NotifyKeyUpdate for PqClientKeyUpdater {
+    fn update_key(&self, _identity: &Keypair) -> Result<(), Box<dyn core::error::Error>> {
+        Err(std::io::Error::other(
+            "PQ credential changes require reconfiguring the trusted PQ service",
+        )
+        .into())
+    }
+}
+
 struct RpcRequestMiddleware {
     ledger_path: PathBuf,
     full_snapshot_archive_path_regex: Regex,
@@ -544,27 +557,32 @@ impl JsonRpcService {
 
         let RpcTpuClientArgs(identity_keypair, tpu_client_socket, client_runtime, cancel) =
             config.rpc_tpu_client_args;
-        let my_tpu_address = config
-            .cluster_info
-            .my_contact_info()
-            .tpu(Protocol::QUIC)
-            .ok_or(format!(
-                "Invalid {:?} socket address for TPU",
-                Protocol::QUIC
-            ))?;
-        let leader_updater = create_leader_updater(
-            leader_info,
-            my_tpu_address,
-            config.send_transaction_service_config.tpu_peers.clone(),
-        );
-        let (tpu_sender, client) = create_client(
-            client_runtime,
-            leader_updater,
-            config.send_transaction_service_config.leader_forward_count,
-            Some(identity_keypair),
-            tpu_client_socket,
-            cancel,
-        )?;
+        let (tpu_sender, client) = if config.rpc_config.experimental_pq.is_some() {
+            (None, None)
+        } else {
+            let my_tpu_address = config
+                .cluster_info
+                .my_contact_info()
+                .tpu(Protocol::QUIC)
+                .ok_or(format!(
+                    "Invalid {:?} socket address for TPU",
+                    Protocol::QUIC
+                ))?;
+            let leader_updater = create_leader_updater(
+                leader_info,
+                my_tpu_address,
+                config.send_transaction_service_config.tpu_peers.clone(),
+            );
+            let (sender, client) = create_client(
+                client_runtime,
+                leader_updater,
+                config.send_transaction_service_config.leader_forward_count,
+                Some(identity_keypair),
+                tpu_client_socket,
+                cancel,
+            )?;
+            (Some(sender), Some(client))
+        };
 
         let json_rpc_service = Self::new(
             config.rpc_addr,
@@ -614,8 +632,8 @@ impl JsonRpcService {
         send_transaction_service_config: send_transaction_service::Config,
         max_slots: Arc<MaxSlots>,
         leader_schedule_cache: Arc<LeaderScheduleCache>,
-        tpu_sender: TpuSender,
-        client: TpuClient,
+        tpu_sender: Option<TpuSender>,
+        client: Option<TpuClient>,
         max_complete_transaction_status_slot: Arc<AtomicU64>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
         runtime: Arc<TokioRuntime>,
@@ -689,6 +707,7 @@ impl JsonRpcService {
             };
 
         let full_api = config.full_api;
+        let pq_mode = config.experimental_pq.is_some();
         let max_request_body_size = config
             .max_request_body_size
             .unwrap_or(MAX_REQUEST_BODY_SIZE);
@@ -713,13 +732,18 @@ impl JsonRpcService {
             Arc::clone(&runtime),
         );
 
-        let _send_transaction_service = Arc::new(SendTransactionService::new(
-            bank_forks.clone(),
-            receiver,
-            tpu_sender,
-            send_transaction_service_config,
-            exit,
-        ));
+        let _send_transaction_service = if pq_mode {
+            drop(receiver);
+            None
+        } else {
+            Some(Arc::new(SendTransactionService::new(
+                bank_forks.clone(),
+                receiver,
+                tpu_sender.ok_or("classical RPC forwarding requires a TPU sender")?,
+                send_transaction_service_config,
+                exit,
+            )))
+        };
 
         #[cfg(test)]
         let test_request_processor = request_processor.clone();
@@ -799,7 +823,9 @@ impl JsonRpcService {
             #[cfg(test)]
             request_processor: test_request_processor,
             close_handle: Some(close_handle),
-            client_updater: Arc::new(client) as Arc<dyn NotifyKeyUpdate + Send + Sync>,
+            client_updater: client
+                .map(|client| Arc::new(client) as Arc<dyn NotifyKeyUpdate + Send + Sync>)
+                .unwrap_or_else(|| Arc::new(PqClientKeyUpdater)),
         })
     }
 
@@ -1227,8 +1253,8 @@ mod tests {
             send_transaction_service_config,
             Arc::new(MaxSlots::default()),
             Arc::new(LeaderScheduleCache::default()),
-            tpu_sender,
-            client,
+            Some(tpu_sender),
+            Some(client),
             Arc::new(AtomicU64::default()),
             Some(Arc::new(PrioritizationFeeCache::default())),
             runtime,

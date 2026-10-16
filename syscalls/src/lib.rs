@@ -932,6 +932,9 @@ impl BuiltinFunctionDefinition<InvokeContext<'_, '_>> for SyscallSecp256k1Recove
         result_addr: u64,
         _: u64,
     ) -> Result<u64, Error> {
+        if invoke_context.is_classical_authentication_disabled() {
+            return Err(InstructionError::InvalidArgument.into());
+        }
         let cost = invoke_context.get_execution_cost().secp256k1_recover_cost;
         invoke_context.consume_checked(cost)?;
 
@@ -6340,6 +6343,91 @@ mod tests {
         assert_matches!(
             result,
             Result::Err(error) if error.downcast_ref::<SyscallError>().unwrap() == &SyscallError::InvalidLength
+        );
+    }
+
+    #[test]
+    fn test_pq_cutoff_disables_classical_signature_recovery() {
+        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
+        struct Callback(bool);
+        impl InvokeContextCallback for Callback {
+            fn is_classical_authentication_disabled(&self) -> bool {
+                self.0
+            }
+        }
+        let feature_set = SVMFeatureSet::default();
+        let environments = ProgramRuntimeEnvironments::mock();
+        let sysvars = SysvarCache::default();
+        let message = libsecp256k1::Message::parse(&[0x29; 32]);
+        let secret = libsecp256k1::SecretKey::parse(&[1; 32]).unwrap();
+        let (signature, recovery) = libsecp256k1::sign(&message, &secret);
+        let hash = message.serialize();
+        let signature = signature.serialize();
+        let mut output = [0u8; SECP256K1_PUBLIC_KEY_LENGTH];
+        let configuration = Config::default();
+        let mapping = unsafe {
+            MemoryMapping::new(
+                vec![
+                    MemoryRegion::new(&raw const hash, 0x100000000),
+                    MemoryRegion::new(&raw const signature, 0x200000000),
+                    MemoryRegion::new(&raw mut output, 0x300000000),
+                ],
+                &configuration,
+                SBPFVersion::V3,
+            )
+            .unwrap()
+        };
+        invoke_context
+            .memory_contexts
+            .mock_set_mapping_abi_v1(mapping);
+        invoke_context.environment_config = EnvironmentConfig::new(
+            Hash::default(),
+            0,
+            false,
+            &Callback(false),
+            &feature_set,
+            &environments,
+            &sysvars,
+        );
+        assert_eq!(
+            SyscallSecp256k1Recover::rust(
+                &mut invoke_context,
+                0x100000000,
+                u64::from(recovery.serialize()),
+                0x200000000,
+                0x300000000,
+                0
+            )
+            .unwrap(),
+            SUCCESS
+        );
+        assert_eq!(
+            output,
+            libsecp256k1::PublicKey::from_secret_key(&secret).serialize()[1..]
+        );
+        invoke_context.environment_config = EnvironmentConfig::new(
+            Hash::default(),
+            0,
+            false,
+            &Callback(true),
+            &feature_set,
+            &environments,
+            &sysvars,
+        );
+        // Even otherwise valid verification cannot reach the classical backend;
+        // this is a VM error so a caller cannot ignore a recover-error code.
+        let error = SyscallSecp256k1Recover::rust(
+            &mut invoke_context,
+            0x100000000,
+            u64::from(recovery.serialize()),
+            0x200000000,
+            0x300000000,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<InstructionError>(),
+            Some(&InstructionError::InvalidArgument)
         );
     }
 

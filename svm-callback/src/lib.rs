@@ -6,6 +6,12 @@ use {
 
 /// Callback used by InvokeContext in SVM
 pub trait InvokeContextCallback {
+    /// A trusted runtime migration can retire classical verification globally.
+    /// The default preserves ordinary Agave behavior for other SVM embedders.
+    fn is_classical_authentication_disabled(&self) -> bool {
+        false
+    }
+
     /// Returns the total current epoch stake for the network.
     fn get_epoch_stake(&self) -> u64 {
         0

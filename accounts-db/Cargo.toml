@@ -48,6 +48,7 @@ blake3 = { workspace = true }
 bv = { workspace = true, features = ["serde"] }
 dashmap = { workspace = true, features = ["rayon", "raw-api"] }
 itertools = { workspace = true }
+imbl = { workspace = true }
 log = { workspace = true }
 modular-bitfield = { workspace = true }
 num_cpus = { workspace = true }

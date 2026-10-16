@@ -1,0 +1,35 @@
+{
+  "format": "accepted-Main30-admission-per-requested-offer-second-v1",
+  "all4_source_generated_admitted_success_equal": true,
+  "cohorts": [
+    {
+      "cohort": "Ordinary",
+      "configured_target_total_tps": 16000,
+      "admitted_transactions": 9600000,
+      "requested_offer_seconds": 600,
+      "admitted_per_requested_offer_second": 16000.0
+    },
+    {
+      "cohort": "PQ matched",
+      "configured_target_total_tps": 16000,
+      "admitted_transactions": 1524533,
+      "requested_offer_seconds": 120,
+      "admitted_per_requested_offer_second": 12704.441666666668
+    },
+    {
+      "cohort": "PQ pressure",
+      "configured_target_total_tps": 32000,
+      "admitted_transactions": 1737733,
+      "requested_offer_seconds": 120,
+      "admitted_per_requested_offer_second": 14481.108333333334
+    },
+    {
+      "cohort": "PQ hour",
+      "configured_target_total_tps": 8000,
+      "admitted_transactions": 29275165,
+      "requested_offer_seconds": 3660,
+      "admitted_per_requested_offer_second": 7998.678961748634
+    }
+  ],
+  "qualification": "Dividing admitted count by requested offer duration is not drain-inclusive TPS or a claim that every configured target was injected."
+}

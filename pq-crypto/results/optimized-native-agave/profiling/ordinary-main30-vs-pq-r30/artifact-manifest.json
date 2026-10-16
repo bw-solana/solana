@@ -1,0 +1,13 @@
+{
+  "format": "Main30-sanitized-ordinary-comparison-publication-manifest-v1",
+  "public_destination": "pq-crypto/results/optimized-native-agave/profiling/ordinary-main30-vs-pq-r30/",
+  "source_sha384": "bfb1ce4c509e3b8a932500a5beeeb6123f584ab93528beef9b1345950a5b8be81a539d48ea3c951067ee3e96542b5699",
+  "projection_sha384": "58ec14d4e1558eee43a95fa9fa75dcd44788b782c661153b499b22f7f8a455f55555e0468436e19361aa3d0649f4a6fc",
+  "files_sha384": {
+    "README.md": "9fcd5041aec710ba5d080f679daf933dc2c719fb70ebed8db97b93b39b82c355751382925c8516ca6ac92aa30a99774b",
+    "comparison.json": "1ab766693d8caceb4b35e3868ff2c7ef87786d9dc27482126549c1c07d68ccd5b82d4a2316b00c921ffa77d5e96de383",
+    "observed-admission-rates.json": "716f22ce3d79e2d82d881dbc9998b45a436bd0e315115f574741e58ddd53337f12e45c0f16688d1c31fe97b6437124b9",
+    "throughput-and-owned-cost-proxies.png": "769cbb4673c06b0a740c4d0d865341fc457a7a06ffe19df771d2be404086dad2db4683c6018bc19c64eaee7130a96697",
+    "throughput-and-owned-cost-proxies.svg": "43bf571c31ba2572f602353e0ec3ae42fb810624e01c9c69f7ad025b0b3c6f475cc7b5c12416e91912efad6a8e0a4196"
+  }
+}

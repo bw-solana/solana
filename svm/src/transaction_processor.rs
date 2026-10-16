@@ -405,6 +405,40 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         self.execution_cost = cost;
     }
 
+    /// Create a real SVM processor whose speculative program deployment/cache
+    /// updates cannot affect another candidate at the same protocol slot.
+    pub fn new_isolated_from(&self, slot: Slot, epoch: Epoch) -> Self {
+        let builtin_program_ids = self.builtin_program_ids.read().unwrap().clone();
+        let environments = self.program_runtime_environment.clone();
+        let mut builtin_program_cache = ProgramCacheForTxBatch::new(slot);
+        let mut cache = ProgramCache::new(self.slot);
+        let parent_builtins = self.builtin_program_cache.read().unwrap();
+        for program in &builtin_program_ids {
+            let entry = parent_builtins
+                .find(program)
+                .expect("registered builtin must exist in parent builtin cache");
+            cache.assign_program(&environments, *program, slot, Arc::clone(&entry));
+            builtin_program_cache.replenish(*program, entry);
+        }
+        let preparation = self.epoch_boundary_preparation.read().unwrap();
+        Self {
+            slot,
+            epoch,
+            sysvar_cache: RwLock::default(),
+            epoch_boundary_preparation: Arc::new(RwLock::new(EpochBoundaryPreparation {
+                upcoming_epoch: preparation.upcoming_epoch,
+                upcoming_environment: preparation.upcoming_environment.clone(),
+                programs_to_recompile: Vec::new(),
+            })),
+            global_program_cache: Arc::new(RwLock::new(cache)),
+            program_runtime_environment: environments,
+            deployment_env_override: None,
+            builtin_program_ids: RwLock::new(builtin_program_ids),
+            builtin_program_cache: RwLock::new(builtin_program_cache),
+            execution_cost: self.execution_cost,
+        }
+    }
+
     /// Updates the environments when entering a new Epoch.
     pub fn set_program_runtime_environment(&mut self, new_environment: ProgramRuntimeEnvironment) {
         // First update the environment only if it is different

@@ -12,6 +12,7 @@ use {
     agave_votor_messages::migration::MigrationStatus,
     arc_swap::ArcSwap,
     log::*,
+    solana_accounts_db::ancestors::Ancestors,
     solana_clock::Slot,
     solana_hash::Hash,
     solana_measure::measure::Measure,
@@ -78,12 +79,15 @@ pub struct BankForks {
     descendants: HashMap<Slot, HashSet<Slot>>,
     root: Slot,
     working_slot: Slot,
-    sharable_banks: SharableBanks,
+    sharable_banks: Option<SharableBanks>,
     scheduler_pool: Option<InstalledSchedulerPoolArc>,
 
     /// The status tracker for the Alpenglow migration. Initialized via either
     /// the genesis or snapshot bank and then updated via block replay.
     migration_status: Arc<MigrationStatus>,
+    /// A single trusted PQ execution actor can expose a not-yet-published Bank
+    /// to SVM cache ancestry without retaining that Bank and creating a cycle.
+    pq_execution_context: Option<(Slot, Ancestors)>,
 }
 
 impl Index<u64> for BankForks {
@@ -96,6 +100,33 @@ impl Index<u64> for BankForks {
 impl BankForks {
     pub fn new_rw_arc(root_bank: Bank) -> Arc<RwLock<Self>> {
         let root_bank = Arc::new(root_bank);
+        let bank_forks = Self::new_graph_view(Arc::clone(&root_bank));
+        root_bank.set_fork_graph_in_program_cache(Arc::downgrade(&bank_forks));
+        bank_forks
+    }
+
+    /// The private view must not redirect its ancestor's live program cache.
+    pub(crate) fn new_private_pq_program_graph(
+        root_bank: Arc<Bank>,
+        slot: Slot,
+    ) -> Arc<RwLock<Self>> {
+        let ancestors = root_bank.ancestors.clone();
+        // SVM needs ancestry metadata, not ownership of ancestor Banks. Keeping
+        // those Banks here would retain every private AccountsDB after its
+        // candidate is finalized, even when the Bank's parent is detached.
+        Arc::new(RwLock::new(Self {
+            banks: HashMap::new(),
+            descendants: HashMap::new(),
+            root: root_bank.slot(),
+            working_slot: slot,
+            sharable_banks: None,
+            scheduler_pool: None,
+            migration_status: Arc::new(Self::initialize_migration_status(&root_bank)),
+            pq_execution_context: Some((slot, ancestors)),
+        }))
+    }
+
+    fn new_graph_view(root_bank: Arc<Bank>) -> Arc<RwLock<Self>> {
         let root_slot = root_bank.slot();
 
         let mut banks = HashMap::new();
@@ -124,23 +155,40 @@ impl BankForks {
         }
         let migration_status = Arc::new(Self::initialize_migration_status(&root_bank));
 
-        let bank_forks = Arc::new(RwLock::new(Self {
+        Arc::new(RwLock::new(Self {
             root: root_slot,
             working_slot: root_slot,
-            sharable_banks: SharableBanks {
+            sharable_banks: Some(SharableBanks {
                 root_bank: Arc::new(ArcSwap::from(root_bank.clone())),
                 // working bank is initially the same as root - all banks are either the root
                 // or its ancestors.
                 working_bank: Arc::new(ArcSwap::from(root_bank.clone())),
-            },
+            }),
             banks,
             descendants,
             scheduler_pool: None,
             migration_status,
-        }));
+            pq_execution_context: None,
+        }))
+    }
 
-        root_bank.set_fork_graph_in_program_cache(Arc::downgrade(&bank_forks));
-        bank_forks
+    pub fn set_pq_execution_context(&mut self, slot: Slot, ancestors: Ancestors) {
+        assert!(ancestors.max_slot() < slot);
+        assert!(
+            self.pq_execution_context.is_none(),
+            "PQ execution contexts must not overlap"
+        );
+        self.pq_execution_context = Some((slot, ancestors));
+    }
+
+    pub fn clear_pq_execution_context(&mut self, slot: Slot) {
+        assert_eq!(
+            self.pq_execution_context
+                .as_ref()
+                .map(|(current, _)| *current),
+            Some(slot)
+        );
+        self.pq_execution_context = None;
     }
 
     /// Based on the current feature flag activation and genesis certificate account in the root bank,
@@ -279,11 +327,14 @@ impl BankForks {
     }
 
     pub fn sharable_banks(&self) -> SharableBanks {
-        self.sharable_banks.clone()
+        self.sharable_banks
+            .as_ref()
+            .expect("private PQ ancestry graph cannot publish Banks")
+            .clone()
     }
 
     pub fn root_bank(&self) -> Arc<Bank> {
-        self.sharable_banks.root()
+        self.sharable_banks().root()
     }
 
     pub fn install_scheduler_pool(&mut self, pool: InstalledSchedulerPoolArc) {
@@ -303,7 +354,68 @@ impl BankForks {
         mode: SchedulingMode,
         bank: Bank,
     ) -> BankWithScheduler {
-        let bank = Arc::new(bank);
+        self.insert_arc_with_scheduling_mode(mode, Arc::new(bank))
+    }
+
+    /// Publish the certified PQ branch without copying its AccountsDB Bank or
+    /// invalidating Arc references held by already-executed descendant Banks.
+    pub fn insert_frozen_arc(&mut self, bank: Arc<Bank>) -> BankWithScheduler {
+        assert!(
+            bank.is_frozen(),
+            "only a frozen certified Bank can be inserted"
+        );
+        self.insert_arc_with_scheduling_mode(SchedulingMode::BlockVerification, bank)
+    }
+
+    /// Promote the certified Bank itself, retaining its exact executed state,
+    /// transaction/replay caches and deployed program view. Caller checks the
+    /// certificate and payload before invoking this serialized root operation.
+    pub fn promote_pq_candidate(
+        &mut self,
+        bank: Arc<Bank>,
+        expected_parent_state: [u8; 48],
+    ) -> solana_accounts_db::accounts_scan::ScanResult<Arc<Bank>> {
+        let root = self.root_bank();
+        if !bank.is_frozen()
+            || bank.parent_slot() != root.slot()
+            || bank.parent_hash() != root.hash()
+            || root.pq_state_commitment() != expected_parent_state
+            || self.banks.contains_key(&bank.slot())
+        {
+            return Err(solana_accounts_db::accounts_scan::ScanError::Aborted(
+                "PQ promotion must extend the exact current root with a fresh frozen Bank"
+                    .to_owned(),
+            ));
+        }
+        bank.promote_pq_candidate(expected_parent_state)?;
+        bank.adopt_pq_program_fork_graph_from(&root);
+        // A detached descendant can execute before its parent is certified,
+        // so its cloned roots omit recent canonical promotions. The guards
+        // above and successful persistence bind it to this exact parent. Only
+        // merge that parent's roots; ordinary set_root/squash adds this slot
+        // and prunes both replay caches at the unchanged native limit.
+        let canonical_parent_roots = root
+            .status_cache
+            .read()
+            .unwrap()
+            .roots()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        bank.status_cache
+            .write()
+            .unwrap()
+            .add_roots(canonical_parent_roots);
+        self.insert_frozen_arc(Arc::clone(&bank));
+        self.set_root(bank.slot(), None, Some(bank.slot()));
+        Ok(bank)
+    }
+
+    fn insert_arc_with_scheduling_mode(
+        &mut self,
+        mode: SchedulingMode,
+        bank: Arc<Bank>,
+    ) -> BankWithScheduler {
         let bank = if let Some(scheduler_pool) = &self.scheduler_pool {
             Self::install_scheduler_into_bank(scheduler_pool, mode, bank)
         } else {
@@ -319,7 +431,9 @@ impl BankForks {
 
         // Update sharable working bank and cached slot.
         self.working_slot = self.find_highest_slot();
-        self.sharable_banks.working_bank.store(self.working_bank());
+        self.sharable_banks()
+            .working_bank
+            .store(self.working_bank());
 
         bank
     }
@@ -365,7 +479,9 @@ impl BankForks {
         // Update sharable working bank and cached slot.
         // The previous working bank (highest slot) may have been removed.
         self.working_slot = self.find_highest_slot();
-        self.sharable_banks.working_bank.store(self.working_bank());
+        self.sharable_banks()
+            .working_bank
+            .store(self.working_bank());
 
         Some(bank)
     }
@@ -453,14 +569,14 @@ impl BankForks {
         snapshot_controller: Option<&SnapshotController>,
         highest_super_majority_root: Option<Slot>,
     ) -> (Vec<BankWithScheduler>, SetRootMetrics) {
-        let old_epoch = self.sharable_banks.root().epoch();
+        let old_epoch = self.sharable_banks().root().epoch();
 
         let root_bank = &self
             .get(root)
             .expect("root bank didn't exist in bank_forks");
 
         self.root = root;
-        self.sharable_banks.root_bank.store(Arc::clone(root_bank));
+        self.sharable_banks().root_bank.store(Arc::clone(root_bank));
 
         let new_epoch = root_bank.epoch();
         if old_epoch != new_epoch {
@@ -729,6 +845,29 @@ impl BankForks {
 
 impl ForkGraph for BankForks {
     fn relationship(&self, a: Slot, b: Slot) -> BlockRelation {
+        if let Some((slot, ancestors)) = &self.pq_execution_context {
+            if self.sharable_banks.is_none() {
+                let known = |value| value == *slot || ancestors.contains_key(&value);
+                return if !known(a) || !known(b) {
+                    BlockRelation::Unknown
+                } else if a == b {
+                    BlockRelation::Equal
+                } else if a < b {
+                    BlockRelation::Ancestor
+                } else {
+                    BlockRelation::Descendant
+                };
+            }
+            if a == *slot && b == *slot {
+                return BlockRelation::Equal;
+            }
+            if b == *slot && ancestors.contains_key(&a) {
+                return BlockRelation::Ancestor;
+            }
+            if a == *slot && ancestors.contains_key(&b) {
+                return BlockRelation::Descendant;
+            }
+        }
         let known_slot_range = self.root()..=self.highest_slot();
         if known_slot_range.contains(&a) && known_slot_range.contains(&b) {
             {
@@ -942,6 +1081,8 @@ mod tests {
             bank_forks.working_slot = 1;
             bank_forks
                 .sharable_banks
+                .as_ref()
+                .unwrap()
                 .working_bank
                 .store(child_bank.clone());
         }

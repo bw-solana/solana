@@ -114,6 +114,9 @@ impl Bank {
                 .map(|(tx, lock_result)| {
                     let tx = tx.borrow();
                     lock_result.clone()?;
+                    if self.pq_config()?.is_some() {
+                        self.verify_pq_transaction(&tx.to_versioned_transaction(), tx)?;
+                    }
 
                     let compute_budget_and_limits =
                         self.check_compute_budget_and_limits(tx, error_counters)?;
@@ -258,7 +261,25 @@ impl Bank {
 
         for (message_ref, lock_result) in messages.iter().zip(lock_results.iter_mut()) {
             let processed_slot = if lock_result.is_ok() {
-                self.get_processed_slot(message_ref.borrow(), &rcache)
+                match self.pq_config().and_then(|config| {
+                    config
+                        .map(|config| {
+                            crate::pq::replay_identity(message_ref.borrow(), &config.chain_id)
+                        })
+                        .transpose()
+                        .map(Option::flatten)
+                }) {
+                    Ok(Some(identity)) => self.pq_replay_cache.read().unwrap().processed_slot(
+                        &identity,
+                        &self.ancestors,
+                        rcache.roots(),
+                    ),
+                    Ok(None) => self.get_processed_slot(message_ref.borrow(), &rcache),
+                    Err(error) => {
+                        *lock_result = Err(error);
+                        None
+                    }
+                }
             } else {
                 None
             };
